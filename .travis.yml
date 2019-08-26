@@ -44,6 +44,4 @@ deploy:
   file_glob: true
   file: wheelhouse/*.whl
   skip_cleanup: true
-  on:
-    tags: true
      
