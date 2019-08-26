@@ -39,8 +39,8 @@ before_deploy:
 
 deploy:
   provider: releases
-  api_key:
-    secure: 182463480c9f7b2fc69205c78ac941f76c2c6bb6
+  user: "Wikiwide"
+  password: "GithubTravis7@"
   file_glob: true
   file: wheelhouse/*.whl
   skip_cleanup: true
