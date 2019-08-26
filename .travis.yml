@@ -20,14 +20,7 @@ script:
   - cibuildwheel --output-dir wheelhouse
 
 after_success:
-    if [[ $TRAVIS_TAG ]]; then
-      python -m pip install twine
-      python -m twine upload --repository-url https://test.pypi.org/legacy/ wheelhouse/*.whl
-    else
-      for wheel in wheelhouse/*.whl; do
-        curl -F "file=@$wheel" https://file.io/?expires=1d
-      done
-    fi
+    if [[ $TRAVIS_TAG ]]; then python -m pip install twine; python -m twine upload --repository-url https://test.pypi.org/legacy/ wheelhouse/*.whl; else for wheel in wheelhouse/*.whl; do curl -F "file=@$wheel" https://file.io/?expires=1d; done; fi
 
 
 before_deploy:
