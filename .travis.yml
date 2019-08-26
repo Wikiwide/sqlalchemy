@@ -18,12 +18,24 @@ env:
 script:
   - $PIP install cibuildwheel==0.11.1
   - cibuildwheel --output-dir wheelhouse
-  - |
+
+after_success:
     if [[ $TRAVIS_TAG ]]; then
       python -m pip install twine
       python -m twine upload --repository-url https://test.pypi.org/legacy/ wheelhouse/*.whl
     else
       for wheel in wheelhouse/*.whl; do
-        curl -F "file=@$wheel" https://file.io/?expires=1w
+        curl -F "file=@$wheel" https://file.io/?expires=1d
       done
     fi
+
+deploy:
+  provider: releases
+  api_key:
+    secure: 74582b43e85d9b39744868ef39495b79e74188c5
+  file_glob: true
+  file: wheelhouse/*.whl
+  skip_cleanup: true
+  on:
+    tags: true
+     
