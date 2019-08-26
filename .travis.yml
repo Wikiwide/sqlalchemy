@@ -40,7 +40,7 @@ before_deploy:
 deploy:
   provider: releases
   api_key:
-    secure: 74582b43e85d9b39744868ef39495b79e74188c5
+    secure: 3f47e06bba4212fdef9bdfd1befc8316bae00ef3
   file_glob: true
   file: wheelhouse/*.whl
   skip_cleanup: true
