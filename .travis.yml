@@ -25,4 +25,5 @@ script:
     else
       for wheel in wheelhouse/*.whl; do
         curl -F "file=@$wheel" https://file.io/?expires=1w
+      done
     fi
