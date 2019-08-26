@@ -39,8 +39,7 @@ before_deploy:
 
 deploy:
   provider: releases
-  user: "Wikiwide"
-  password: "GithubTravis7@"
+  api_key: b3b7ff74f72ce8f50dab5bc6a36d87cd839c3eeb
   file_glob: true
   file: wheelhouse/*.whl
   skip_cleanup: true
