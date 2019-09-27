@@ -24,7 +24,7 @@ after_success:
 
 
 before_deploy:
-- export TRAVIS_TAG="1.3.7.$TRAVIS_BUILD_NUMBER"
+- export TRAVIS_TAG="1.3.8.$TRAVIS_BUILD_NUMBER"
 - echo "$TRAVIS_TAG" "$TRAVIS_COMMIT"
 - git config --local user.name "$USER_NAME"
 - git config --local user.email "$USER_EMAIL"
@@ -32,7 +32,7 @@ before_deploy:
 
 deploy:
   provider: releases
-  api_key: b3b7ff74f72ce8f50dab5bc6a36d87cd839c3eeb
+  api_key: ${GITHUB}
   file_glob: true
   file: wheelhouse/*.whl
   skip_cleanup: true
