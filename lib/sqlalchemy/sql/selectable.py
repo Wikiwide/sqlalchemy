@@ -19,6 +19,7 @@ from . import operators
 from . import roles
 from . import type_api
 from .annotation import Annotated
+from .annotation import SupportsCloneAnnotations
 from .base import _clone
 from .base import _cloned_difference
 from .base import _cloned_intersection
@@ -1246,13 +1247,10 @@ class AliasedReturnsRows(FromClause):
         self.element._generate_fromclause_column_proxies(self)
 
     def _copy_internals(self, clone=_clone, **kw):
-        # don't apply anything to an aliased Table
-        # for now.   May want to drive this from
-        # the given **kw.
-        if isinstance(self.element, TableClause):
-            return
-        self._reset_exported()
-        self.element = clone(self.element, **kw)
+        element = clone(self.element, **kw)
+        if element is not self.element:
+            self._reset_exported()
+        self.element = element
 
     def get_children(self, column_collections=True, **kw):
         if column_collections:
@@ -1508,6 +1506,9 @@ class CTE(Generative, HasSuffixes, AliasedReturnsRows):
             [clone(elem, **kw) for elem in self._restates]
         )
 
+    def _cache_key(self, *arg, **kw):
+        raise NotImplementedError("TODO")
+
     def alias(self, name=None, flat=False):
         """Return an :class:`.Alias` of this :class:`.CTE`.
 
@@ -1751,6 +1752,18 @@ class Subquery(AliasedReturnsRows):
         return coercions.expect(
             roles.SelectStatementRole, selectable
         ).subquery(name=name)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Subquery.as_scalar` method, which was previously "
+        "``Alias.as_scalar()`` prior to version 1.4, is deprecated and "
+        "will be removed in a future release; Please use the "
+        ":meth:`.Select.scalar_subquery` method of the :func:`.select` "
+        "construct before constructing a subquery object, or with the ORM "
+        "use the :meth:`.Query.scalar_subquery` method.",
+    )
+    def as_scalar(self):
+        return self.element.scalar_subquery()
 
 
 class FromGrouping(GroupedElement, FromClause):
@@ -2068,6 +2081,7 @@ class SelectBase(
     roles.InElementRole,
     HasCTE,
     Executable,
+    SupportsCloneAnnotations,
     Selectable,
 ):
     """Base class for SELECT statements.
@@ -2379,7 +2393,53 @@ class SelectStatementGrouping(GroupedElement, SelectBase):
         return self.element._from_objects
 
 
-class GenerativeSelect(SelectBase):
+class DeprecatedSelectBaseGenerations(object):
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.GenerativeSelect.append_order_by` method is deprecated "
+        "and will be removed in a future release.  Use the generative method "
+        ":meth:`.GenerativeSelect.order_by`.",
+    )
+    def append_order_by(self, *clauses):
+        """Append the given ORDER BY criterion applied to this selectable.
+
+        The criterion will be appended to any pre-existing ORDER BY criterion.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.GenerativeSelect.order_by` method is preferred, as it
+        provides standard :term:`method chaining`.
+
+        .. seealso::
+
+            :meth:`.GenerativeSelect.order_by`
+
+        """
+        self.order_by.non_generative(self, *clauses)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.GenerativeSelect.append_group_by` method is deprecated "
+        "and will be removed in a future release.  Use the generative method "
+        ":meth:`.GenerativeSelect.group_by`.",
+    )
+    def append_group_by(self, *clauses):
+        """Append the given GROUP BY criterion applied to this selectable.
+
+        The criterion will be appended to any pre-existing GROUP BY criterion.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.GenerativeSelect.group_by` method is preferred, as it
+        provides standard :term:`method chaining`.
+
+        .. seealso::
+
+            :meth:`.GenerativeSelect.group_by`
+
+        """
+        self.group_by.non_generative(self, *clauses)
+
+
+class GenerativeSelect(DeprecatedSelectBaseGenerations, SelectBase):
     """Base class for SELECT statements where additional elements can be
     added.
 
@@ -2662,7 +2722,14 @@ class GenerativeSelect(SelectBase):
 
         """
 
-        self.append_order_by(*clauses)
+        if len(clauses) == 1 and clauses[0] is None:
+            self._order_by_clause = ClauseList()
+        else:
+            if getattr(self, "_order_by_clause", None) is not None:
+                clauses = list(self._order_by_clause) + list(clauses)
+            self._order_by_clause = ClauseList(
+                *clauses, _literal_as_text_role=roles.OrderByRole
+            )
 
     @_generative
     def group_by(self, *clauses):
@@ -2683,45 +2750,6 @@ class GenerativeSelect(SelectBase):
 
         """
 
-        self.append_group_by(*clauses)
-
-    def append_order_by(self, *clauses):
-        """Append the given ORDER BY criterion applied to this selectable.
-
-        The criterion will be appended to any pre-existing ORDER BY criterion.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.GenerativeSelect.order_by` method is preferred, as it
-        provides standard :term:`method chaining`.
-
-        .. seealso::
-
-            :meth:`.GenerativeSelect.order_by`
-
-        """
-        if len(clauses) == 1 and clauses[0] is None:
-            self._order_by_clause = ClauseList()
-        else:
-            if getattr(self, "_order_by_clause", None) is not None:
-                clauses = list(self._order_by_clause) + list(clauses)
-            self._order_by_clause = ClauseList(
-                *clauses, _literal_as_text_role=roles.OrderByRole
-            )
-
-    def append_group_by(self, *clauses):
-        """Append the given GROUP BY criterion applied to this selectable.
-
-        The criterion will be appended to any pre-existing GROUP BY criterion.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.GenerativeSelect.group_by` method is preferred, as it
-        provides standard :term:`method chaining`.
-
-        .. seealso::
-
-            :meth:`.GenerativeSelect.group_by`
-
-        """
         if len(clauses) == 1 and clauses[0] is None:
             self._group_by_clause = ClauseList()
         else:
@@ -2736,10 +2764,7 @@ class GenerativeSelect(SelectBase):
         raise NotImplementedError()
 
     def _copy_internals(self, clone=_clone, **kw):
-        if self._limit_clause is not None:
-            self._limit_clause = clone(self._limit_clause, **kw)
-        if self._offset_clause is not None:
-            self._offset_clause = clone(self._offset_clause, **kw)
+        raise NotImplementedError()
 
 
 class CompoundSelect(GenerativeSelect):
@@ -2985,12 +3010,13 @@ class CompoundSelect(GenerativeSelect):
         return self.selects[0].selected_columns
 
     def _copy_internals(self, clone=_clone, **kw):
-        super(CompoundSelect, self)._copy_internals(clone, **kw)
         self._reset_memoizations()
         self.selects = [clone(s, **kw) for s in self.selects]
         if hasattr(self, "_col_map"):
             del self._col_map
         for attr in (
+            "_limit_clause",
+            "_offset_clause",
             "_order_by_clause",
             "_group_by_clause",
             "_for_update_arg",
@@ -3040,7 +3066,127 @@ class CompoundSelect(GenerativeSelect):
     bind = property(bind, _set_bind)
 
 
-class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
+class DeprecatedSelectGenerations(object):
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Select.append_correlation` method is deprecated "
+        "and will be removed in a future release.  Use the generative "
+        "method :meth:`.Select.correlate`.",
+    )
+    def append_correlation(self, fromclause):
+        """append the given correlation expression to this select()
+        construct.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.Select.correlate` method is preferred, as it provides
+        standard :term:`method chaining`.
+
+        """
+
+        self.correlate.non_generative(self, fromclause)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Select.append_column` method is deprecated "
+        "and will be removed in a future release.  Use the generative "
+        "method :meth:`.Select.column`.",
+    )
+    def append_column(self, column):
+        """append the given column expression to the columns clause of this
+        select() construct.
+
+        E.g.::
+
+            my_select.append_column(some_table.c.new_column)
+
+        This is an **in-place** mutation method; the
+        :meth:`~.Select.column` method is preferred, as it provides standard
+        :term:`method chaining`.
+
+        See the documentation for :meth:`.Select.with_only_columns`
+        for guidelines on adding /replacing the columns of a
+        :class:`.Select` object.
+
+        """
+        self.column.non_generative(self, column)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Select.append_prefix` method is deprecated "
+        "and will be removed in a future release.  Use the generative "
+        "method :meth:`.Select.prefix_with`.",
+    )
+    def append_prefix(self, clause):
+        """append the given columns clause prefix expression to this select()
+        construct.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.Select.prefix_with` method is preferred, as it provides
+        standard :term:`method chaining`.
+
+        """
+        self.prefix_with.non_generative(self, clause)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Select.append_whereclause` method is deprecated "
+        "and will be removed in a future release.  Use the generative "
+        "method :meth:`.Select.where`.",
+    )
+    def append_whereclause(self, whereclause):
+        """append the given expression to this select() construct's WHERE
+        criterion.
+
+        The expression will be joined to existing WHERE criterion via AND.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.Select.where` method is preferred, as it provides standard
+        :term:`method chaining`.
+
+        """
+        self.where.non_generative(self, whereclause)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Select.append_having` method is deprecated "
+        "and will be removed in a future release.  Use the generative "
+        "method :meth:`.Select.having`.",
+    )
+    def append_having(self, having):
+        """append the given expression to this select() construct's HAVING
+        criterion.
+
+        The expression will be joined to existing HAVING criterion via AND.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.Select.having` method is preferred, as it provides standard
+        :term:`method chaining`.
+
+        """
+
+        self.having.non_generative(self, having)
+
+    @util.deprecated(
+        "1.4",
+        "The :meth:`.Select.append_from` method is deprecated "
+        "and will be removed in a future release.  Use the generative "
+        "method :meth:`.Select.select_from`.",
+    )
+    def append_from(self, fromclause):
+        """append the given FromClause expression to this select() construct's
+        FROM clause.
+
+        This is an **in-place** mutation method; the
+        :meth:`~.Select.select_from` method is preferred, as it provides
+        standard :term:`method chaining`.
+
+        """
+        self.select_from.non_generative(self, fromclause)
+
+
+class Select(
+    HasPrefixes, HasSuffixes, DeprecatedSelectGenerations, GenerativeSelect
+):
     """Represents a ``SELECT`` statement.
 
     """
@@ -3566,7 +3712,6 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
         return False
 
     def _copy_internals(self, clone=_clone, **kw):
-        super(Select, self)._copy_internals(clone, **kw)
 
         # Select() object has been cloned and probably adapted by the
         # given clone function.  Apply the cloning function to internal
@@ -3612,6 +3757,8 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
         # present here.
         self._raw_columns = [clone(c, **kw) for c in self._raw_columns]
         for attr in (
+            "_limit_clause",
+            "_offset_clause",
             "_whereclause",
             "_having",
             "_order_by_clause",
@@ -3698,7 +3845,13 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
             :class:`.Select` object.
 
         """
-        self.append_column(column)
+        self._reset_memoizations()
+        column = coercions.expect(roles.ColumnsClauseRole, column)
+
+        if isinstance(column, ScalarSelect):
+            column = column.self_group(against=operators.comma_op)
+
+        self._raw_columns = self._raw_columns + [column]
 
     @util.dependencies("sqlalchemy.sql.util")
     def reduce_columns(self, sqlutil, only_synonyms=True):
@@ -3815,7 +3968,8 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
 
         """
 
-        self.append_whereclause(whereclause)
+        self._reset_memoizations()
+        self._whereclause = and_(True_._ifnone(self._whereclause), whereclause)
 
     @_generative
     def having(self, having):
@@ -3823,7 +3977,8 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
         its HAVING clause, joined to the existing clause via AND, if any.
 
         """
-        self.append_having(having)
+        self._reset_memoizations()
+        self._having = and_(True_._ifnone(self._having), having)
 
     @_generative
     def distinct(self, *expr):
@@ -3876,7 +4031,9 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
             select([func.count('*')]).select_from(table1)
 
         """
-        self.append_from(fromclause)
+        self._reset_memoizations()
+        fromclause = coercions.expect(roles.FromClauseRole, fromclause)
+        self._from_obj = self._from_obj.union([fromclause])
 
     @_generative
     def correlate(self, *fromclauses):
@@ -3919,6 +4076,7 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
             :ref:`correlated_subqueries`
 
         """
+
         self._auto_correlate = False
         if fromclauses and fromclauses[0] is None:
             self._correlate = ()
@@ -3961,100 +4119,6 @@ class Select(HasPrefixes, HasSuffixes, GenerativeSelect):
             self._correlate_except = set(self._correlate_except or ()).union(
                 coercions.expect(roles.FromClauseRole, f) for f in fromclauses
             )
-
-    def append_correlation(self, fromclause):
-        """append the given correlation expression to this select()
-        construct.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.Select.correlate` method is preferred, as it provides
-        standard :term:`method chaining`.
-
-        """
-
-        self._auto_correlate = False
-        self._correlate = set(self._correlate).union(
-            coercions.expect(roles.FromClauseRole, f) for f in fromclause
-        )
-
-    def append_column(self, column):
-        """append the given column expression to the columns clause of this
-        select() construct.
-
-        E.g.::
-
-            my_select.append_column(some_table.c.new_column)
-
-        This is an **in-place** mutation method; the
-        :meth:`~.Select.column` method is preferred, as it provides standard
-        :term:`method chaining`.
-
-        See the documentation for :meth:`.Select.with_only_columns`
-        for guidelines on adding /replacing the columns of a
-        :class:`.Select` object.
-
-        """
-        self._reset_memoizations()
-        column = coercions.expect(roles.ColumnsClauseRole, column)
-
-        if isinstance(column, ScalarSelect):
-            column = column.self_group(against=operators.comma_op)
-
-        self._raw_columns = self._raw_columns + [column]
-
-    def append_prefix(self, clause):
-        """append the given columns clause prefix expression to this select()
-        construct.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.Select.prefix_with` method is preferred, as it provides
-        standard :term:`method chaining`.
-
-        """
-        clause = coercions.expect(roles.WhereHavingRole, clause)
-        self._prefixes = self._prefixes + (clause,)
-
-    def append_whereclause(self, whereclause):
-        """append the given expression to this select() construct's WHERE
-        criterion.
-
-        The expression will be joined to existing WHERE criterion via AND.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.Select.where` method is preferred, as it provides standard
-        :term:`method chaining`.
-
-        """
-
-        self._reset_memoizations()
-        self._whereclause = and_(True_._ifnone(self._whereclause), whereclause)
-
-    def append_having(self, having):
-        """append the given expression to this select() construct's HAVING
-        criterion.
-
-        The expression will be joined to existing HAVING criterion via AND.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.Select.having` method is preferred, as it provides standard
-        :term:`method chaining`.
-
-        """
-        self._reset_memoizations()
-        self._having = and_(True_._ifnone(self._having), having)
-
-    def append_from(self, fromclause):
-        """append the given FromClause expression to this select() construct's
-        FROM clause.
-
-        This is an **in-place** mutation method; the
-        :meth:`~.Select.select_from` method is preferred, as it provides
-        standard :term:`method chaining`.
-
-        """
-        self._reset_memoizations()
-        fromclause = coercions.expect(roles.FromClauseRole, fromclause)
-        self._from_obj = self._from_obj.union([fromclause])
 
     @_memoized_property
     def selected_columns(self):

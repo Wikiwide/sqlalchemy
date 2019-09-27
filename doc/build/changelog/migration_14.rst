@@ -188,6 +188,67 @@ refined so that it is more compatible with Core.
 Behavioral Changes - ORM
 ========================
 
+.. _change_1763:
+
+Eager loaders emit during unexpire operations
+---------------------------------------------
+
+A long sought behavior was that when an expired object is accessed, configured
+eager loaders will run in order to eagerly load relationships on the expired
+object when the object is refreshed or otherwise unexpired.   This behavior has
+now been added, so that joinedloaders will add inline JOINs as usual, and
+selectin/subquery loaders will run an "immediateload" operation for a given
+relationship, when an expired object is unexpired or an object is refreshed::
+
+    >>> a1 = session.query(A).options(joinedload(A.bs)).first()
+    >>> a1.data = 'new data'
+    >>> session.commit()
+
+Above, the ``A`` object was loaded with a ``joinedload()`` option associated
+with it in order to eagerly load the ``bs`` collection.    After the
+``session.commit()``, the state of the object is expired.  Upon accessing
+the ``.data`` column attribute, the object is refreshed and this will now
+include the joinedload operation as well::
+
+    >>> a1.data
+    SELECT a.id AS a_id, a.data AS a_data, b_1.id AS b_1_id, b_1.a_id AS b_1_a_id
+    FROM a LEFT OUTER JOIN b AS b_1 ON a.id = b_1.a_id
+    WHERE a.id = ?
+
+The behavior applies both to loader strategies applied to the
+:func:`.relationship` directly, as well as with options used with
+:meth:`.Query.options`, provided that the object was originally loaded by that
+query.
+
+For the "secondary" eager loaders "selectinload" and "subqueryload", the SQL
+strategy for these loaders is not necessary in order to eagerly load attributes
+on a single object; so they will instead invoke the "immediateload" strategy in
+a refresh scenario, which resembles the query emitted by "lazyload", emitted as
+an additional query::
+
+    >>> a1 = session.query(A).options(selectinload(A.bs)).first()
+    >>> a1.data = 'new data'
+    >>> session.commit()
+    >>> a1.data
+    SELECT a.id AS a_id, a.data AS a_data
+    FROM a
+    WHERE a.id = ?
+    (1,)
+    SELECT b.id AS b_id, b.a_id AS b_a_id
+    FROM b
+    WHERE ? = b.a_id
+    (1,)
+
+Note that a loader option does not apply to an object that was introduced
+into the :class:`.Session` in a different way.  That is, if the ``a1`` object
+were just persisted in this :class:`.Session`, or was loaded with a different
+query before the eager option had been applied, then the object doesn't have
+an eager load option associated with it.  This is not a new concept, however
+users who are looking for the eagerload on refresh behavior may find this
+to be more noticeable.
+
+:ticket:`1763`
+
 .. _change_4519:
 
 Accessing an uninitialized collection attribute on a transient object no longer mutates __dict__
@@ -473,6 +534,172 @@ as::
 
 
 :ticket:`4753`
+
+.. _change_4449:
+
+Improved column labeling for simple column expressions using CAST or similar
+----------------------------------------------------------------------------
+
+A user pointed out that the PostgreSQL database has a convenient behavior when
+using functions like CAST against a named column, in that the result column name
+is named the same as the inner expression::
+
+    test=> SELECT CAST(data AS VARCHAR) FROM foo;
+
+    data
+    ------
+     5
+    (1 row)
+
+This allows one to apply CAST to table columns while not losing the column
+name (above using the name ``"data"``) in the result row.    Compare to
+databases such as MySQL/MariaDB, as well as most others, where the column
+name is taken from the full SQL expression and is not very portable::
+
+    MariaDB [test]> SELECT CAST(data AS CHAR) FROM foo;
+    +--------------------+
+    | CAST(data AS CHAR) |
+    +--------------------+
+    | 5                  |
+    +--------------------+
+    1 row in set (0.003 sec)
+
+
+In SQLAlchemy Core expressions, we never deal with a raw generated name like
+the above, as SQLAlchemy applies auto-labeling to expressions like these, which
+are up until now always a so-called "anonymous" expression::
+
+    >>> print(select([cast(foo.c.data, String)]))
+    SELECT CAST(foo.data AS VARCHAR) AS anon_1     # old behavior
+    FROM foo
+
+These anonymous expressions were necessary as SQLAlchemy's
+:class:`.ResultProxy` made heavy use of result column names in order to match
+up datatypes, such as the :class:`.String` datatype which used to have
+result-row-processing behavior, to the correct column, so most importantly the
+names had to be both easy to determine in a database-agnostic manner as well as
+unique in all cases.    In SQLAlchemy 1.0 as part of :ticket:`918`, this
+reliance on named columns in result rows (specifically the
+``cursor.description`` element of the PEP-249 cursor) was scaled back to not be
+necessary for most Core SELECT constructs; in release 1.4, the system overall
+is becoming more comfortable with SELECT statements that have duplicate column
+or label names such as in :ref:`change_4753`.  So we now emulate PostgreSQL's
+reasonable behavior for simple modifications to a single column, most
+prominently with CAST::
+
+    >>> print(select([cast(foo.c.data, String)]))
+    SELECT CAST(foo.data AS VARCHAR) AS data
+    FROM foo
+
+For CAST against expressions that don't have a name, the previous logic is used
+to generate the usual "anonymous" labels::
+
+    >>> print(select([cast('hi there,' + foo.c.data, String)]))
+    SELECT CAST(:data_1 + foo.data AS VARCHAR) AS anon_1
+    FROM foo
+
+A :func:`.cast` against a :class:`.Label`, despite having to omit the label
+expression as these don't render inside of a CAST, will nonetheless make use of
+the given name::
+
+    >>> print(select([cast(('hi there,' + foo.c.data).label('hello_data'), String)]))
+    SELECT CAST(:data_1 + foo.data AS VARCHAR) AS hello_data
+    FROM foo
+
+And of course as was always the case, :class:`.Label` can be applied to the
+expression on the outside to apply an "AS <name>" label directly::
+
+    >>> print(select([cast(('hi there,' + foo.c.data), String).label('hello_data')]))
+    SELECT CAST(:data_1 + foo.data AS VARCHAR) AS hello_data
+    FROM foo
+
+
+:ticket:`4449`
+
+.. _change_4808:
+
+New "post compile" bound parameters used for LIMIT/OFFSET in Oracle, SQL Server
+-------------------------------------------------------------------------------
+
+A major goal of the 1.4 series is to establish that all Core SQL constructs
+are completely cacheable, meaning that a particular :class:`.Compiled`
+structure will produce an identical SQL string regardless of any SQL parameters
+used with it, which notably includes those used to specify the LIMIT and
+OFFSET values, typically used for pagination and "top N" style results.
+
+While SQLAlchemy has used bound parameters for LIMIT/OFFSET schemes for many
+years, a few outliers remained where such parameters were not allowed, including
+a SQL Server "TOP N" statement, such as::
+
+    SELECT TOP 5 mytable.id, mytable.data FROM mytable
+
+as well as with Oracle, where the FIRST_ROWS() hint (which SQLAlchemy will
+use if the ``optimize_limits=True`` parameter is passed to
+:func:`.create_engine` with an Oracle URL) does not allow them,
+but also that using bound parameters with ROWNUM comparisons has been reported
+as producing slower query plans::
+
+    SELECT anon_1.id, anon_1.data FROM (
+        SELECT /*+ FIRST_ROWS(5) */
+        anon_2.id AS id,
+        anon_2.data AS data,
+        ROWNUM AS ora_rn FROM (
+            SELECT mytable.id, mytable.data FROM mytable
+        ) anon_2
+        WHERE ROWNUM <= :param_1
+    ) anon_1 WHERE ora_rn > :param_2
+
+In order to allow for all statements to be unconditionally cacheable at the
+compilation level, a new form of bound parameter called a "post compile"
+parameter has been added, which makes use of the same mechanism as that
+of "expanding IN parameters".  This is a :func:`.bindparam` that behaves
+identically to any other bound parameter except that parameter value will
+be rendered literally into the SQL string before sending it to the DBAPI
+``cursor.execute()`` method.   The new parameter is used internally by the
+SQL Server and Oracle dialects, so that the drivers receive the literal
+rendered value but the rest of SQLAlchemy can still consider this as a
+bound parameter.   The above two statements when stringified using
+``str(statement.compile(dialect=<dialect>))`` now look like::
+
+    SELECT TOP [POSTCOMPILE_param_1] mytable.id, mytable.data FROM mytable
+
+and::
+
+    SELECT anon_1.id, anon_1.data FROM (
+        SELECT /*+ FIRST_ROWS([POSTCOMPILE__ora_frow_1]) */
+        anon_2.id AS id,
+        anon_2.data AS data,
+        ROWNUM AS ora_rn FROM (
+            SELECT mytable.id, mytable.data FROM mytable
+        ) anon_2
+        WHERE ROWNUM <= [POSTCOMPILE_param_1]
+    ) anon_1 WHERE ora_rn > [POSTCOMPILE_param_2]
+
+The ``[POSTCOMPILE_<param>]`` format is also what is seen when an
+"expanding IN" is used.
+
+When viewing the SQL logging output, the final form of the statement will
+be seen::
+
+    SELECT anon_1.id, anon_1.data FROM (
+        SELECT /*+ FIRST_ROWS(5) */
+        anon_2.id AS id,
+        anon_2.data AS data,
+        ROWNUM AS ora_rn FROM (
+            SELECT mytable.id AS id, mytable.data AS data FROM mytable
+        ) anon_2
+        WHERE ROWNUM <= 8
+    ) anon_1 WHERE ora_rn > 3
+
+
+The "post compile parameter" feature is exposed as public API through the
+:paramref:`.bindparam.literal_execute` parameter, however is currently not
+intended for general use.   The literal values are rendered using the
+:meth:`.TypeEngine.literal_processor` of the underlying datatype, which in
+SQLAlchemy has **extremely limited** scope, supporting only integers and simple
+string values.
+
+:ticket:`4808`
 
 .. _change_4712:
 

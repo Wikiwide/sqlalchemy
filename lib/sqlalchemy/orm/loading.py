@@ -269,6 +269,10 @@ def load_on_pk_identity(
     else:
         version_check = False
 
+    if refresh_state and refresh_state.load_options:
+        q = q._with_current_path(refresh_state.load_path.parent)
+        q = q._conditional_options(refresh_state.load_options)
+
     q._get_options(
         populate_existing=bool(refresh_state),
         version_check=version_check,
@@ -629,6 +633,20 @@ def _instance_processor(
     if mapper.polymorphic_map and not _polymorphic_from and not refresh_state:
         # if we are doing polymorphic, dispatch to a different _instance()
         # method specific to the subclass mapper
+
+        def ensure_no_pk(row):
+            identitykey = (
+                identity_class,
+                tuple([row[column] for column in pk_cols]),
+                identity_token,
+            )
+            if not is_not_primary_key(identitykey[1]):
+                raise sa_exc.InvalidRequestError(
+                    "Row with identity key %s can't be loaded into an "
+                    "object; the polymorphic discriminator column '%s' is "
+                    "NULL" % (identitykey, polymorphic_discriminator)
+                )
+
         _instance = _decorate_polymorphic_switch(
             _instance,
             context,
@@ -637,6 +655,7 @@ def _instance_processor(
             path,
             polymorphic_discriminator,
             adapter,
+            ensure_no_pk,
         )
 
     return _instance
@@ -800,6 +819,7 @@ def _decorate_polymorphic_switch(
     path,
     polymorphic_discriminator,
     adapter,
+    ensure_no_pk,
 ):
     if polymorphic_discriminator is not None:
         polymorphic_on = polymorphic_discriminator
@@ -839,7 +859,11 @@ def _decorate_polymorphic_switch(
             _instance = polymorphic_instances[discriminator]
             if _instance:
                 return _instance(row)
-        return instance_fn(row)
+            else:
+                return instance_fn(row)
+        else:
+            ensure_no_pk(row)
+            return None
 
     return polymorphic_instance
 

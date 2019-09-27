@@ -62,6 +62,7 @@ from sqlalchemy.schema import AddConstraint
 from sqlalchemy.schema import CheckConstraint
 from sqlalchemy.sql import column
 from sqlalchemy.sql import ddl
+from sqlalchemy.sql import elements
 from sqlalchemy.sql import null
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import sqltypes
@@ -849,7 +850,7 @@ class TypeCoerceCastTest(fixtures.TablesTest):
         t.insert().values(data=coerce_fn("d1", MyType)).execute()
 
         eq_(
-            select([t.c.data, coerce_fn(t.c.data, MyType)])
+            select([t.c.data.label("x"), coerce_fn(t.c.data, MyType)])
             .alias()
             .select()
             .execute()
@@ -1658,6 +1659,45 @@ class EnumTest(AssertsCompiledSQL, fixtures.TablesTest):
             [(1, "two"), (2, "two"), (3, "one")],
         )
 
+    def test_pep435_default_sort_key(self):
+        one, two, a_member, b_member = (
+            self.one,
+            self.two,
+            self.a_member,
+            self.b_member,
+        )
+        typ = Enum(self.SomeEnum)
+
+        is_(typ.sort_key_function.__func__, typ._db_value_for_elem.__func__)
+
+        eq_(
+            sorted([two, one, a_member, b_member], key=typ.sort_key_function),
+            [a_member, b_member, one, two],
+        )
+
+    def test_pep435_custom_sort_key(self):
+        one, two, a_member, b_member = (
+            self.one,
+            self.two,
+            self.a_member,
+            self.b_member,
+        )
+
+        def sort_enum_key_value(value):
+            return str(value.value)
+
+        typ = Enum(self.SomeEnum, sort_key_function=sort_enum_key_value)
+        is_(typ.sort_key_function, sort_enum_key_value)
+
+        eq_(
+            sorted([two, one, a_member, b_member], key=typ.sort_key_function),
+            [one, two, a_member, b_member],
+        )
+
+    def test_pep435_no_sort_key(self):
+        typ = Enum(self.SomeEnum, sort_key_function=None)
+        is_(typ.sort_key_function, None)
+
     def test_pep435_enum_round_trip(self):
         stdlib_enum_table = self.tables["stdlib_enum_table"]
 
@@ -2324,6 +2364,20 @@ class ExpressionTest(
             ],
         )
 
+    def test_grouped_bind_adapt(self):
+        expr = test_table.c.atimestamp == elements.Grouping(
+            bindparam("thedate")
+        )
+        eq_(expr.right.type._type_affinity, Date)
+        eq_(expr.right.element.type._type_affinity, Date)
+
+        expr = test_table.c.atimestamp == elements.Grouping(
+            elements.Grouping(bindparam("thedate"))
+        )
+        eq_(expr.right.type._type_affinity, Date)
+        eq_(expr.right.element.type._type_affinity, Date)
+        eq_(expr.right.element.element.type._type_affinity, Date)
+
     def test_bind_adapt_update(self):
         bp = bindparam("somevalue")
         stmt = test_table.update().values(avalue=bp)
@@ -2842,6 +2896,18 @@ class IntervalTest(fixtures.TestBase, AssertsExecutionResults):
         eq_(row["native_interval"], None)
         eq_(row["native_interval_args"], None)
         eq_(row["non_native_interval"], None)
+
+
+class IntegerTest(fixtures.TestBase):
+    def test_integer_literal_processor(self):
+        typ = Integer()
+        eq_(typ._cached_literal_processor(testing.db.dialect)(5), "5")
+
+        assert_raises(
+            ValueError,
+            typ._cached_literal_processor(testing.db.dialect),
+            "notanint",
+        )
 
 
 class BooleanTest(

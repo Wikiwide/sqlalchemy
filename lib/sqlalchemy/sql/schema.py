@@ -104,7 +104,17 @@ class SchemaItem(SchemaEventTarget, visitors.Visitable):
 
         for item in args:
             if item is not None:
-                item._set_parent_with_dispatch(self)
+                try:
+                    spwd = item._set_parent_with_dispatch
+                except AttributeError:
+                    util.raise_from_cause(
+                        exc.ArgumentError(
+                            "'SchemaItem' object, such as a 'Column' or a "
+                            "'Constraint' expected, got %r" % item
+                        )
+                    )
+                else:
+                    spwd(self)
 
     def get_children(self, **kwargs):
         """used to allow SchemaVisitor access"""
@@ -2212,13 +2222,13 @@ class ColumnDefault(DefaultGenerator):
             raise exc.ArgumentError(
                 "ColumnDefault may not be a server-side default type."
             )
-        if util.callable(arg):
+        if callable(arg):
             arg = self._maybe_wrap_callable(arg)
         self.arg = arg
 
     @util.memoized_property
     def is_callable(self):
-        return util.callable(self.arg)
+        return callable(self.arg)
 
     @util.memoized_property
     def is_clause_element(self):
@@ -4201,7 +4211,7 @@ class MetaData(SchemaItem):
                     for name, schname in zip(available, available_w_schema)
                     if extend_existing or schname not in current
                 ]
-            elif util.callable(only):
+            elif callable(only):
                 load = [
                     name
                     for name, schname in zip(available, available_w_schema)

@@ -77,12 +77,12 @@ class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_select_composition_two(self):
         s = select()
-        s.append_column(column("column1"))
-        s.append_column(column("column2"))
-        s.append_whereclause(text("column1=12"))
-        s.append_whereclause(text("column2=19"))
+        s = s.column(column("column1"))
+        s = s.column(column("column2"))
+        s = s.where(text("column1=12"))
+        s = s.where(text("column2=19"))
         s = s.order_by("column1")
-        s.append_from(text("table1"))
+        s = s.select_from(text("table1"))
         self.assert_compile(
             s,
             "SELECT column1, column2 FROM table1 WHERE "
@@ -280,6 +280,19 @@ class BindParamTest(fixtures.TestBase, AssertsCompiledSQL):
             "select * from foo where lala=%(bar)s and hoho=%(whee)s",
             checkparams={"bar": 4, "whee": 7},
             dialect="postgresql",
+        )
+
+    def test_unique_binds(self):
+        # unique binds can be used in text() however they uniquify across
+        # multiple text() constructs only, not within a single text
+
+        t1 = text("select :foo").bindparams(bindparam("foo", 5, unique=True))
+        t2 = text("select :foo").bindparams(bindparam("foo", 10, unique=True))
+        stmt = select([t1, t2])
+        self.assert_compile(
+            stmt,
+            "SELECT select :foo_1, select :foo_2",
+            checkparams={"foo_1": 5, "foo_2": 10},
         )
 
     def test_binds_compiled_positional(self):

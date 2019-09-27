@@ -2749,6 +2749,25 @@ class Mapper(InspectionAttr):
         return identity_key[1]
 
     @_memoized_configured_property
+    def _persistent_sortkey_fn(self):
+        key_fns = [col.type.sort_key_function for col in self.primary_key]
+
+        if set(key_fns).difference([None]):
+
+            def key(state):
+                return tuple(
+                    key_fn(val) if key_fn is not None else val
+                    for key_fn, val in zip(key_fns, state.key[1])
+                )
+
+        else:
+
+            def key(state):
+                return state.key[1]
+
+        return key
+
+    @_memoized_configured_property
     def _identity_key_props(self):
         return [self._columntoproperty[col] for col in self.primary_key]
 
@@ -2812,11 +2831,14 @@ class Mapper(InspectionAttr):
         """
         props = self._props
 
+        col_attribute_names = set(attribute_names).intersection(
+            state.mapper.column_attrs.keys()
+        )
         tables = set(
             chain(
                 *[
                     sql_util.find_tables(c, check_columns=True)
-                    for key in attribute_names
+                    for key in col_attribute_names
                     for c in props[key].columns
                 ]
             )
@@ -2884,7 +2906,7 @@ class Mapper(InspectionAttr):
         cond = sql.and_(*allconds)
 
         cols = []
-        for key in attribute_names:
+        for key in col_attribute_names:
             cols.extend(props[key].columns)
         return sql.select(cols, cond, use_labels=True)
 
