@@ -10,8 +10,8 @@ Describing Databases with MetaData
 
 .. module:: sqlalchemy.schema
 
-This section discusses the fundamental :class:`.Table`, :class:`.Column`
-and :class:`.MetaData` objects.
+This section discusses the fundamental :class:`_schema.Table`, :class:`_schema.Column`
+and :class:`_schema.MetaData` objects.
 
 A collection of metadata entities is stored in an object aptly named
 :class:`~sqlalchemy.schema.MetaData`::
@@ -237,20 +237,19 @@ While SQLAlchemy directly supports emitting CREATE and DROP statements for schem
 constructs, the ability to alter those constructs, usually via the ALTER statement
 as well as other database-specific constructs, is outside of the scope of SQLAlchemy
 itself.  While it's easy enough to emit ALTER statements and similar by hand,
-such as by passing a string to :meth:`.Connection.execute` or by using the
+such as by passing a string to :meth:`_engine.Connection.execute` or by using the
 :class:`.DDL` construct, it's a common practice to automate the maintenance of
 database schemas in relation to application code using schema migration tools.
 
-There are two major migration tools available for SQLAlchemy:
+The SQLAlchemy project offers the  `Alembic <https://alembic.sqlalchemy.org>`_
+migration tool for this purpose.   Alembic features a highly customizable
+environment and a minimalistic usage pattern, supporting such features as
+transactional DDL, automatic generation of "candidate" migrations, an "offline"
+mode which generates SQL scripts, and support for branch resolution.
 
-* `Alembic <https://alembic.sqlalchemy.org>`_ - Written by the author of SQLAlchemy,
-  Alembic features a highly customizable environment and a minimalistic usage pattern,
-  supporting such features as transactional DDL, automatic generation of "candidate"
-  migrations, an "offline" mode which generates SQL scripts, and support for branch
-  resolution.
-* `SQLAlchemy-Migrate <https://github.com/openstack/sqlalchemy-migrate>`_ - The original
-  migration tool for SQLAlchemy, SQLAlchemy-Migrate is still used by projects
-  such as Openstack, however is being superseded by Alembic.
+Alembic supersedes the `SQLAlchemy-Migrate
+<https://github.com/openstack/sqlalchemy-migrate>`_   project, which is the
+original migration tool for SQLAlchemy and is now  considered legacy.
 
 
 Specifying the Schema Name
@@ -303,15 +302,15 @@ Column, Table, MetaData API
 
 .. attribute:: sqlalchemy.schema.BLANK_SCHEMA
 
-    Symbol indicating that a :class:`.Table` or :class:`.Sequence`
+    Symbol indicating that a :class:`_schema.Table` or :class:`.Sequence`
     should have 'None' for its schema, even if the parent
-    :class:`.MetaData` has specified a schema.
+    :class:`_schema.MetaData` has specified a schema.
 
     .. seealso::
 
-        :paramref:`.MetaData.schema`
+        :paramref:`_schema.MetaData.schema`
 
-        :paramref:`.Table.schema`
+        :paramref:`_schema.Table.schema`
 
         :paramref:`.Sequence.schema`
 

@@ -1,8 +1,9 @@
 # coding: utf-8
-
 from sqlalchemy import and_
 from sqlalchemy import cast
 from sqlalchemy import Column
+from sqlalchemy import Computed
+from sqlalchemy import Date
 from sqlalchemy import delete
 from sqlalchemy import Enum
 from sqlalchemy import exc
@@ -29,6 +30,8 @@ from sqlalchemy.dialects.postgresql import array_agg as pg_array_agg
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.dialects.postgresql import TSRANGE
+from sqlalchemy.dialects.postgresql.base import PGDialect
+from sqlalchemy.dialects.postgresql.psycopg2 import PGDialect_psycopg2
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import Session
@@ -233,6 +236,22 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             postgresql.CreateEnumType(e2),
             "CREATE TYPE bar.somename AS ENUM ('x', 'y', 'z')",
+            schema_translate_map=schema_translate_map,
+        )
+
+    def test_create_table_with_schema_type_schema_translate(self):
+        e1 = Enum("x", "y", "z", name="somename")
+        e2 = Enum("x", "y", "z", name="somename", schema="someschema")
+        schema_translate_map = {None: "foo", "someschema": "bar"}
+
+        table = Table(
+            "some_table", MetaData(), Column("q", e1), Column("p", e2)
+        )
+        from sqlalchemy.schema import CreateTable
+
+        self.assert_compile(
+            CreateTable(table),
+            "CREATE TABLE foo.some_table (q foo.somename, p bar.somename)",
             schema_translate_map=schema_translate_map,
         )
 
@@ -750,6 +769,64 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=postgresql.dialect(),
         )
 
+    @testing.combinations(
+        (True, "deferred"),
+        (False, "immediate"),
+        argnames="deferrable_value, initially_value",
+    )
+    def test_copy_exclude_constraint_adhoc_columns(
+        self, deferrable_value, initially_value
+    ):
+        meta = MetaData()
+        table = Table(
+            "mytable",
+            meta,
+            Column("myid", Integer, Sequence("foo_id_seq"), primary_key=True),
+            Column("valid_from_date", Date(), nullable=True),
+            Column("valid_thru_date", Date(), nullable=True),
+        )
+        cons = ExcludeConstraint(
+            (
+                literal_column(
+                    "daterange(valid_from_date, valid_thru_date, '[]')"
+                ),
+                "&&",
+            ),
+            where=column("valid_from_date") <= column("valid_thru_date"),
+            name="ex_mytable_valid_date_range",
+            deferrable=deferrable_value,
+            initially=initially_value,
+        )
+
+        table.append_constraint(cons)
+        expected = (
+            "ALTER TABLE mytable ADD CONSTRAINT ex_mytable_valid_date_range "
+            "EXCLUDE USING gist "
+            "(daterange(valid_from_date, valid_thru_date, '[]') WITH &&) "
+            "WHERE (valid_from_date <= valid_thru_date) "
+            "%s %s"
+            % (
+                "NOT DEFERRABLE" if not deferrable_value else "DEFERRABLE",
+                "INITIALLY %s" % initially_value,
+            )
+        )
+        self.assert_compile(
+            schema.AddConstraint(cons),
+            expected,
+            dialect=postgresql.dialect(),
+        )
+
+        meta2 = MetaData()
+        table2 = table.tometadata(meta2)
+        cons2 = [
+            c for c in table2.constraints if isinstance(c, ExcludeConstraint)
+        ][0]
+        self.assert_compile(
+            schema.AddConstraint(cons2),
+            expected,
+            dialect=postgresql.dialect(),
+        )
+
     def test_exclude_constraint_full(self):
         m = MetaData()
         room = Column("room", Integer, primary_key=True)
@@ -763,13 +840,14 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             where="room > 100",
             deferrable=True,
             initially="immediate",
+            ops={"room": "my_opclass"},
         )
         tbl.append_constraint(cons)
         self.assert_compile(
             schema.AddConstraint(cons),
             "ALTER TABLE testtbl ADD CONSTRAINT my_name "
             "EXCLUDE USING gist "
-            "(room WITH =, during WITH "
+            "(room my_opclass WITH =, during WITH "
             "&&) WHERE "
             "(room > 100) DEFERRABLE INITIALLY immediate",
             dialect=postgresql.dialect(),
@@ -878,6 +956,24 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=postgresql.dialect(),
         )
 
+    def test_exclude_constraint_ops_many(self):
+        m = MetaData()
+        tbl = Table(
+            "testtbl", m, Column("room", String), Column("during", TSRANGE)
+        )
+        cons = ExcludeConstraint(
+            ("room", "="),
+            ("during", "&&"),
+            ops={"room": "first_opsclass", "during": "second_opclass"},
+        )
+        tbl.append_constraint(cons)
+        self.assert_compile(
+            schema.AddConstraint(cons),
+            "ALTER TABLE testtbl ADD EXCLUDE USING gist "
+            "(room first_opsclass WITH =, during second_opclass WITH &&)",
+            dialect=postgresql.dialect(),
+        )
+
     def test_substring(self):
         self.assert_compile(
             func.substring("abc", 1, 2),
@@ -931,6 +1027,24 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self.assert_compile(
             table1.select(table1.c.myid == 7).with_for_update(
+                key_share=True, nowait=True
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR NO KEY UPDATE NOWAIT",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                key_share=True, read=True, nowait=True
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR KEY SHARE NOWAIT",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
                 read=True, skip_locked=True
             ),
             "SELECT mytable.myid, mytable.name, mytable.description "
@@ -958,6 +1072,15 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self.assert_compile(
             table1.select(table1.c.myid == 7).with_for_update(
+                key_share=True, read=True, nowait=True, of=table1
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR KEY SHARE OF mytable NOWAIT",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
                 read=True, nowait=True, of=table1.c.myid
             ),
             "SELECT mytable.myid, mytable.name, mytable.description "
@@ -972,6 +1095,27 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %(myid_1)s "
             "FOR SHARE OF mytable NOWAIT",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                read=True,
+                skip_locked=True,
+                of=[table1.c.myid, table1.c.name],
+                key_share=True,
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR KEY SHARE OF mytable SKIP LOCKED",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                skip_locked=True, of=[table1.c.myid, table1.c.name]
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR UPDATE OF mytable SKIP LOCKED",
         )
 
         self.assert_compile(
@@ -1039,11 +1183,29 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self.assert_compile(
             table1.select(table1.c.myid == 7).with_for_update(
+                read=True, of=table1
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR SHARE OF mytable",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
                 read=True, key_share=True, skip_locked=True
             ),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %(myid_1)s "
             "FOR KEY SHARE SKIP LOCKED",
+        )
+
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                key_share=True, skip_locked=True
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR NO KEY UPDATE SKIP LOCKED",
         )
 
         ta = table1.alias()
@@ -1078,6 +1240,26 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "ON table2.mytable_id = mytable_1.myid "
             "WHERE table2.mytable_id = %(mytable_id_1)s "
             "FOR UPDATE OF mytable_1, table2",
+        )
+
+        # ensure of=text() for of works
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                of=text("table1")
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR UPDATE OF table1",
+        )
+
+        # ensure literal_column of works
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                of=literal_column("table1")
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = %(myid_1)s "
+            "FOR UPDATE OF table1",
         )
 
     def test_for_update_with_schema(self):
@@ -1130,19 +1312,59 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         self.assert_compile(
-            c.contains([1]), "x @> %(x_1)s", checkparams={"x_1": [1]}
+            c.contains([1]),
+            "x @> %(x_1)s::INTEGER[]",
+            checkparams={"x_1": [1]},
+            dialect=PGDialect_psycopg2(),
         )
         self.assert_compile(
-            c.contained_by([2]), "x <@ %(x_1)s", checkparams={"x_1": [2]}
+            c.contained_by([2]),
+            "x <@ %(x_1)s::INTEGER[]",
+            checkparams={"x_1": [2]},
+            dialect=PGDialect_psycopg2(),
         )
         self.assert_compile(
-            c.overlap([3]), "x && %(x_1)s", checkparams={"x_1": [3]}
+            c.contained_by([2]),
+            "x <@ %(x_1)s",
+            checkparams={"x_1": [2]},
+            dialect=PGDialect(),
+        )
+        self.assert_compile(
+            c.overlap([3]),
+            "x && %(x_1)s::INTEGER[]",
+            checkparams={"x_1": [3]},
+            dialect=PGDialect_psycopg2(),
         )
         self.assert_compile(
             postgresql.Any(4, c),
             "%(param_1)s = ANY (x)",
             checkparams={"param_1": 4},
         )
+
+        self.assert_compile(
+            c.any(5),
+            "%(param_1)s = ANY (x)",
+            checkparams={"param_1": 5},
+        )
+
+        self.assert_compile(
+            ~c.any(5),
+            "NOT (%(param_1)s = ANY (x))",
+            checkparams={"param_1": 5},
+        )
+
+        self.assert_compile(
+            c.all(5),
+            "%(param_1)s = ALL (x)",
+            checkparams={"param_1": 5},
+        )
+
+        self.assert_compile(
+            ~c.all(5),
+            "NOT (%(param_1)s = ALL (x))",
+            checkparams={"param_1": 5},
+        )
+
         self.assert_compile(
             c.any(5, operator=operators.ne),
             "%(param_1)s != ANY (x)",
@@ -1159,7 +1381,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             checkparams={"param_1": 7},
         )
 
-    def _test_array_zero_indexes(self, zero_indexes):
+    @testing.combinations((True,), (False,))
+    def test_array_zero_indexes(self, zero_indexes):
         c = Column("x", postgresql.ARRAY(Integer, zero_indexes=zero_indexes))
 
         add_one = 1 if zero_indexes else 0
@@ -1196,12 +1419,6 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
                 "param_1": 3 + add_one,
             },
         )
-
-    def test_array_zero_indexes_true(self):
-        self._test_array_zero_indexes(True)
-
-    def test_array_zero_indexes_false(self):
-        self._test_array_zero_indexes(False)
 
     def test_array_literal_type(self):
         isinstance(postgresql.array([1, 2]).type, postgresql.ARRAY)
@@ -1330,6 +1547,15 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "%(param_2)s, %(param_3)s])",
         )
 
+    def test_update_array(self):
+        m = MetaData()
+        t = Table("t", m, Column("data", postgresql.ARRAY(Integer)))
+        self.assert_compile(
+            t.update().values({t.c.data: [1, 3, 4]}),
+            "UPDATE t SET data=%(data)s::INTEGER[]",
+            checkparams={"data": [1, 3, 4]},
+        )
+
     def test_update_array_element(self):
         m = MetaData()
         t = Table("t", m, Column("data", postgresql.ARRAY(Integer)))
@@ -1342,10 +1568,22 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_update_array_slice(self):
         m = MetaData()
         t = Table("t", m, Column("data", postgresql.ARRAY(Integer)))
+
+        # psycopg2-specific, has a cast
         self.assert_compile(
-            t.update().values({t.c.data[2:5]: 2}),
-            "UPDATE t SET data[%(data_1)s:%(data_2)s]=%(param_1)s",
-            checkparams={"param_1": 2, "data_2": 5, "data_1": 2},
+            t.update().values({t.c.data[2:5]: [2, 3, 4]}),
+            "UPDATE t SET data[%(data_1)s:%(data_2)s]="
+            "%(param_1)s::INTEGER[]",
+            checkparams={"param_1": [2, 3, 4], "data_2": 5, "data_1": 2},
+            dialect=PGDialect_psycopg2(),
+        )
+
+        # default dialect does not, as DBAPIs may be doing this for us
+        self.assert_compile(
+            t.update().values({t.c.data[2:5]: [2, 3, 4]}),
+            "UPDATE t SET data[%s:%s]=" "%s",
+            checkparams={"param_1": [2, 3, 4], "data_2": 5, "data_1": 2},
+            dialect=PGDialect(paramstyle="format"),
         )
 
     def test_from_only(self):
@@ -1539,6 +1777,42 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         q = delete(a1).where(a1.c.c1 == t2.c.c1)
         self.assert_compile(
             q, "DELETE FROM t1 AS a1 USING t2 WHERE a1.c1 = t2.c1"
+        )
+
+    @testing.combinations(
+        ("no_persisted", " STORED", "ignore"),
+        ("persisted_none", " STORED", None),
+        ("persisted_true", " STORED", True),
+        id_="iaa",
+    )
+    def test_column_computed(self, text, persisted):
+        m = MetaData()
+        kwargs = {"persisted": persisted} if persisted != "ignore" else {}
+        t = Table(
+            "t",
+            m,
+            Column("x", Integer),
+            Column("y", Integer, Computed("x + 2", **kwargs)),
+        )
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (x INTEGER, y INTEGER GENERATED "
+            "ALWAYS AS (x + 2)%s)" % text,
+        )
+
+    def test_column_computed_persisted_false(self):
+        m = MetaData()
+        t = Table(
+            "t",
+            m,
+            Column("x", Integer),
+            Column("y", Integer, Computed("x + 2", persisted=False)),
+        )
+        assert_raises_message(
+            exc.CompileError,
+            "PostrgreSQL computed columns do not support 'virtual'",
+            schema.CreateTable(t).compile,
+            dialect=postgresql.dialect(),
         )
 
 
@@ -2076,8 +2350,7 @@ class DistinctOnTest(fixtures.TestBase, AssertsCompiledSQL):
 
 class FullTextSearchTest(fixtures.TestBase, AssertsCompiledSQL):
 
-    """Tests for full text searching
-    """
+    """Tests for full text searching"""
 
     __dialect__ = postgresql.dialect()
 
@@ -2098,8 +2371,8 @@ class FullTextSearchTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def _raise_query(self, q):
         """
-            useful for debugging. just do...
-            self._raise_query(q)
+        useful for debugging. just do...
+        self._raise_query(q)
         """
         c = q.compile(dialect=postgresql.dialect())
         raise ValueError(c)

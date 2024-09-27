@@ -4,6 +4,7 @@ import pickle
 from sqlalchemy import cast
 from sqlalchemy import exc
 from sqlalchemy import ForeignKey
+from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -18,12 +19,12 @@ from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import collections
+from sqlalchemy.orm import composite
 from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.collections import attribute_mapped_collection
 from sqlalchemy.orm.collections import collection
 from sqlalchemy.testing import assert_raises
@@ -1613,7 +1614,7 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         UserKeyword, User, Keyword, Singular = (
             cls.classes.UserKeyword,
             cls.classes.User,
@@ -1621,7 +1622,7 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
             cls.classes.Singular,
         )
 
-        session = sessionmaker()()
+        session = Session(connection)
         words = ("quick", "brown", "fox", "jumped", "over", "the", "lazy")
         for ii in range(16):
             user = User("user%d" % ii)
@@ -1648,7 +1649,9 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         session.commit()
         cls.u = user
         cls.kw = user.keywords[0]
-        cls.session = session
+
+        # TODO: this is not the correct pattern, use session per test
+        cls.session = Session(testing.db)
 
     def _equivalent(self, q_proxy, q_direct):
         proxy_sql = q_proxy.statement.compile(dialect=default.DefaultDialect())
@@ -1657,6 +1660,26 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
         eq_(str(proxy_sql), str(direct_sql))
         eq_(q_proxy.all(), q_direct.all())
+
+    def test_no_straight_expr(self):
+        User = self.classes.User
+
+        assert_raises_message(
+            NotImplementedError,
+            "The association proxy can't be used as a plain column expression",
+            func.foo,
+            User.singular_value,
+        )
+
+        # this raises the same NotImplementedError as above in 1.4
+        # because we consistently call __clause_element__().   1.3 not
+        # quite there :)
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "SQL expression, column, or mapped entity expected ",
+            self.session.query,
+            User.singular_value,
+        )
 
     def test_filter_any_criterion_ul_scalar(self):
         UserKeyword, User = self.classes.UserKeyword, self.classes.User
@@ -2328,6 +2351,74 @@ class DictOfTupleUpdateTest(fixtures.TestBase):
             (("B", 3), "elem2"),
             (("C", 4), "elem3"),
         )
+
+
+class CompositeAccessTest(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        class Point(cls.Basic):
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+
+            def __composite_values__(self):
+                return [self.x, self.y]
+
+            __hash__ = None
+
+            def __eq__(self, other):
+                return (
+                    isinstance(other, Point)
+                    and other.x == self.x
+                    and other.y == self.y
+                )
+
+            def __ne__(self, other):
+                return not isinstance(other, Point) or not self.__eq__(other)
+
+        class Graph(cls.DeclarativeBasic):
+            __tablename__ = "graph"
+            id = Column(
+                Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            name = Column(String(30))
+
+            point_data = relationship("PointData")
+
+            points = association_proxy(
+                "point_data",
+                "point",
+                creator=lambda point: PointData(point=point),
+            )
+
+        class PointData(fixtures.ComparableEntity, cls.DeclarativeBasic):
+            __tablename__ = "point"
+
+            id = Column(
+                Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            graph_id = Column(ForeignKey("graph.id"))
+
+            x1 = Column(Integer)
+            y1 = Column(Integer)
+
+            point = composite(Point, x1, y1)
+
+        return Point, Graph, PointData
+
+    def test_append(self):
+        Point, Graph, PointData = self.classes("Point", "Graph", "PointData")
+
+        g1 = Graph()
+        g1.points.append(Point(3, 5))
+        eq_(g1.point_data, [PointData(point=Point(3, 5))])
+
+    def test_access(self):
+        Point, Graph, PointData = self.classes("Point", "Graph", "PointData")
+        g1 = Graph()
+        g1.point_data.append(PointData(point=Point(3, 5)))
+        g1.point_data.append(PointData(point=Point(10, 7)))
+        eq_(g1.points, [Point(3, 5), Point(10, 7)])
 
 
 class AttributeAccessTest(fixtures.TestBase):
@@ -3080,12 +3171,15 @@ class MultiOwnerTest(
         is_(association_proxy_object.for_class(D, d2), inst2)
 
     def test_col_expressions_not_available(self):
-        D, = self.classes("D")
+        (D,) = self.classes("D")
 
         self._assert_raises_ambiguous(lambda: D.c_data == 5)
 
     def test_rel_expressions_not_available(self):
-        B, D, = self.classes("B", "D")
+        (
+            B,
+            D,
+        ) = self.classes("B", "D")
 
         self._assert_raises_ambiguous(lambda: D.c_data.any(B.id == 5))
 
@@ -3269,7 +3363,7 @@ class ProxyHybridTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
         )
 
     def test_explicit_expr(self):
-        C, = self.classes("C")
+        (C,) = self.classes("C")
 
         s = Session()
         self.assert_compile(
@@ -3371,10 +3465,10 @@ class ScopeBehaviorTest(fixtures.DeclarativeMappedTest):
             data = Column(String(50))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B = cls.classes("A", "B")
 
-        s = Session(testing.db)
+        s = Session(connection)
         s.add_all(
             [
                 A(id=1, bs=[B(data="b1"), B(data="b2")]),

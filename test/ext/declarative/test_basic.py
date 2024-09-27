@@ -13,6 +13,7 @@ from sqlalchemy import testing
 from sqlalchemy import UniqueConstraint
 from sqlalchemy import util
 from sqlalchemy.ext import declarative as decl
+from sqlalchemy.ext.declarative import DeclarativeMeta
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.ext.declarative import synonym_for
 from sqlalchemy.ext.declarative.base import _DeferredMapperConfig
@@ -837,6 +838,59 @@ class DeclarativeTest(DeclarativeTestBase):
         configure_mappers()
         assert (
             class_mapper(User).get_property("props").secondary is user_to_prop
+        )
+
+    def test_string_dependency_resolution_table_over_class(self):
+        # test for second half of #5774
+        class User(Base, fixtures.ComparableEntity):
+
+            __tablename__ = "users"
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+            props = relationship(
+                "Prop",
+                secondary="Secondary",
+                backref="users",
+            )
+
+        class Prop(Base, fixtures.ComparableEntity):
+
+            __tablename__ = "props"
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+
+        # class name and table name match
+        class Secondary(Base):
+            __tablename__ = "Secondary"
+            user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+            prop_id = Column(Integer, ForeignKey("props.id"), primary_key=True)
+
+        configure_mappers()
+        assert (
+            class_mapper(User).get_property("props").secondary
+            is Secondary.__table__
+        )
+
+    def test_string_dependency_resolution_class_over_table(self):
+        # test for second half of #5774
+        class User(Base, fixtures.ComparableEntity):
+
+            __tablename__ = "users"
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+            secondary = relationship(
+                "Secondary",
+            )
+
+        # class name and table name match
+        class Secondary(Base):
+            __tablename__ = "Secondary"
+            user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+
+        configure_mappers()
+        assert (
+            class_mapper(User).get_property("secondary").mapper
+            is Secondary.__mapper__
         )
 
     def test_string_dependency_resolution_schemas(self):
@@ -2127,6 +2181,33 @@ class DeclarativeTest(DeclarativeTestBase):
 
         assert not hasattr(Foo, "data_hybrid")
 
+    @testing.requires.python36
+    def test_kw_support_in_declarative_meta_init(self):
+        # This will not fail if DeclarativeMeta __init__ supports **kw
+
+        class BaseUser(Base):
+            __tablename__ = "base"
+            id_ = Column(Integer, primary_key=True)
+
+            @classmethod
+            def __init_subclass__(cls, random_keyword=False, **kw):
+                super().__init_subclass__(**kw)
+                cls._set_random_keyword_used_here = random_keyword
+
+        class User(BaseUser):
+            __tablename__ = "user"
+            id_ = Column(Integer, ForeignKey("base.id_"), primary_key=True)
+
+        # Check the default option
+        eq_(User._set_random_keyword_used_here, False)
+
+        # Build the metaclass with a keyword!
+        bases = (BaseUser,)
+        UserType = DeclarativeMeta("UserType", bases, {}, random_keyword=True)
+
+        # Check to see if __init_subclass__ works in supported versions
+        eq_(UserType._set_random_keyword_used_here, True)
+
 
 def _produce_test(inline, stringbased):
     class ExplicitJoinTest(fixtures.MappedTest):
@@ -2181,7 +2262,7 @@ def _produce_test(inline, stringbased):
                     )
 
         @classmethod
-        def insert_data(cls):
+        def insert_data(cls, connection):
             params = [
                 dict(list(zip(("id", "name"), column_values)))
                 for column_values in [
@@ -2192,8 +2273,9 @@ def _produce_test(inline, stringbased):
                 ]
             ]
 
-            User.__table__.insert().execute(params)
-            Address.__table__.insert().execute(
+            connection.execute(User.__table__.insert(), params)
+            connection.execute(
+                Address.__table__.insert(),
                 [
                     dict(list(zip(("id", "user_id", "email"), column_values)))
                     for column_values in [
@@ -2203,7 +2285,7 @@ def _produce_test(inline, stringbased):
                         (4, 8, "ed@lala.com"),
                         (5, 9, "fred@fred.com"),
                     ]
-                ]
+                ],
             )
 
         def test_aliased_join(self):

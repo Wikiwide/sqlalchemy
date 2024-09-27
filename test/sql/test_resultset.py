@@ -34,7 +34,7 @@ from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import le_
 from sqlalchemy.testing import ne_
-from sqlalchemy.testing import not_in_
+from sqlalchemy.testing import not_in
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.mock import patch
 from sqlalchemy.testing.schema import Column
@@ -187,7 +187,7 @@ class ResultProxyTest(fixtures.TablesTest):
 
         row = testing.db.execute(content.select(use_labels=True)).first()
         in_(content.c.type, row)
-        not_in_(bar.c.content_type, row)
+        not_in(bar.c.content_type, row)
         in_(sql.column("content_type"), row)
 
         row = testing.db.execute(
@@ -195,16 +195,16 @@ class ResultProxyTest(fixtures.TablesTest):
         ).first()
         in_(content.c.type, row)
 
-        not_in_(bar.c.content_type, row)
+        not_in(bar.c.content_type, row)
 
         in_(sql.column("content_type"), row)
 
         row = testing.db.execute(
             select([func.now().label("content_type")])
         ).first()
-        not_in_(content.c.type, row)
+        not_in(content.c.type, row)
 
-        not_in_(bar.c.content_type, row)
+        not_in(bar.c.content_type, row)
 
         in_(sql.column("content_type"), row)
 
@@ -413,15 +413,15 @@ class ResultProxyTest(fixtures.TablesTest):
         )
 
         if testing.against("sqlite < 3.10.0"):
-            not_in_("user_id", r)
-            not_in_("user_name", r)
+            not_in("user_id", r)
+            not_in("user_name", r)
             eq_(r["users.user_id"], 1)
             eq_(r["users.user_name"], "john")
 
             eq_(list(r.keys()), ["users.user_id", "users.user_name"])
         else:
-            not_in_("users.user_id", r)
-            not_in_("users.user_name", r)
+            not_in("users.user_id", r)
+            not_in("users.user_name", r)
             eq_(r["user_id"], 1)
             eq_(r["user_name"], "john")
 
@@ -450,8 +450,8 @@ class ResultProxyTest(fixtures.TablesTest):
             eq_(r["users.user_id"], 1)
             eq_(r["users.user_name"], "john")
         else:
-            not_in_("users.user_id", r)
-            not_in_("users.user_name", r)
+            not_in("users.user_id", r)
+            not_in("users.user_name", r)
 
         eq_(list(r.keys()), ["user_id", "user_name"])
 
@@ -473,7 +473,7 @@ class ResultProxyTest(fixtures.TablesTest):
         )
         eq_(r["users.user_id"], 1)
         eq_(r["users.user_name"], "john")
-        not_in_("user_name", r)
+        not_in("user_name", r)
         eq_(list(r.keys()), ["users.user_id", "users.user_name"])
 
     def test_column_accessor_unary(self):
@@ -613,7 +613,7 @@ class ResultProxyTest(fixtures.TablesTest):
 
         in_("case_insensitive", row._keymap)
         in_("CaseSensitive", row._keymap)
-        not_in_("casesensitive", row._keymap)
+        not_in("casesensitive", row._keymap)
 
         eq_(row["case_insensitive"], 1)
         eq_(row["CaseSensitive"], 2)
@@ -640,7 +640,7 @@ class ResultProxyTest(fixtures.TablesTest):
 
         in_("case_insensitive", row._keymap)
         in_("CaseSensitive", row._keymap)
-        not_in_("casesensitive", row._keymap)
+        not_in("casesensitive", row._keymap)
 
         eq_(row["case_insensitive"], 1)
         eq_(row["CaseSensitive"], 2)
@@ -1250,17 +1250,19 @@ class KeyTargetingTest(fixtures.TablesTest):
             )
 
     @classmethod
-    def insert_data(cls):
-        cls.tables.keyed1.insert().execute(dict(b="a1", q="c1"))
-        cls.tables.keyed2.insert().execute(dict(a="a2", b="b2"))
-        cls.tables.keyed3.insert().execute(dict(a="a3", d="d3"))
-        cls.tables.keyed4.insert().execute(dict(b="b4", q="q4"))
-        cls.tables.content.insert().execute(type="t1")
+    def insert_data(cls, connection):
+        conn = connection
+        conn.execute(cls.tables.keyed1.insert(), dict(b="a1", q="c1"))
+        conn.execute(cls.tables.keyed2.insert(), dict(a="a2", b="b2"))
+        conn.execute(cls.tables.keyed3.insert(), dict(a="a3", d="d3"))
+        conn.execute(cls.tables.keyed4.insert(), dict(b="b4", q="q4"))
+        conn.execute(cls.tables.content.insert(), dict(type="t1"))
 
         if testing.requires.schemas.enabled:
-            cls.tables[
-                "%s.wschema" % testing.config.test_schema
-            ].insert().execute(dict(b="a1", q="c1"))
+            conn.execute(
+                cls.tables["%s.wschema" % testing.config.test_schema].insert(),
+                dict(b="a1", q="c1"),
+            )
 
     @testing.requires.schemas
     def test_keyed_accessor_wschema(self):
@@ -1358,24 +1360,24 @@ class KeyTargetingTest(fixtures.TablesTest):
             select([content.c.type.label("content_type")])
         ).first()
 
-        not_in_(content.c.type, row)
-        not_in_(bar.c.content_type, row)
+        not_in(content.c.type, row)
+        not_in(bar.c.content_type, row)
 
         in_(sql.column("content_type"), row)
 
         row = testing.db.execute(
             select([func.now().label("content_type")])
         ).first()
-        not_in_(content.c.type, row)
-        not_in_(bar.c.content_type, row)
+        not_in(content.c.type, row)
+        not_in(bar.c.content_type, row)
         in_(sql.column("content_type"), row)
 
     def test_column_label_overlap_fallback_2(self):
         content, bar = self.tables.content, self.tables.bar
         row = testing.db.execute(content.select(use_labels=True)).first()
         in_(content.c.type, row)
-        not_in_(bar.c.content_type, row)
-        not_in_(sql.column("content_type"), row)
+        not_in(bar.c.content_type, row)
+        not_in(sql.column("content_type"), row)
 
     def test_columnclause_schema_column_one(self):
         keyed2 = self.tables.keyed2
@@ -1472,9 +1474,10 @@ class PositionalTextTest(fixtures.TablesTest):
         )
 
     @classmethod
-    def insert_data(cls):
-        cls.tables.text1.insert().execute(
-            [dict(a="a1", b="b1", c="c1", d="d1")]
+    def insert_data(cls, connection):
+        connection.execute(
+            cls.tables.text1.insert(),
+            [dict(a="a1", b="b1", c="c1", d="d1")],
         )
 
     def test_via_column(self):
@@ -1651,8 +1654,8 @@ class AlternateResultProxyTest(fixtures.TablesTest):
         )
 
     @classmethod
-    def insert_data(cls):
-        cls.engine.execute(
+    def insert_data(cls, connection):
+        connection.execute(
             cls.tables.test.insert(),
             [{"x": i, "y": "t_%d" % i} for i in range(1, 12)],
         )

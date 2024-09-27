@@ -9,38 +9,41 @@ Managing Transactions
 
 A newly constructed :class:`.Session` may be said to be in the "begin" state.
 In this state, the :class:`.Session` has not established any connection or
-transactional state with any of the :class:`.Engine` objects that may be associated
+transactional state with any of the :class:`_engine.Engine` objects that may be associated
 with it.
 
 The :class:`.Session` then receives requests to operate upon a database connection.
 Typically, this means it is called upon to execute SQL statements using a particular
-:class:`.Engine`, which may be via :meth:`.Session.query`, :meth:`.Session.execute`,
+:class:`_engine.Engine`, which may be via :meth:`.Session.query`, :meth:`.Session.execute`,
 or within a flush operation of pending data, which occurs when such state exists
 and :meth:`.Session.commit` or :meth:`.Session.flush` is called.
 
-As these requests are received, each new :class:`.Engine` encountered is associated
+As these requests are received, each new :class:`_engine.Engine` encountered is associated
 with an ongoing transactional state maintained by the :class:`.Session`.
-When the first :class:`.Engine` is operated upon, the :class:`.Session` can be said
+When the first :class:`_engine.Engine` is operated upon, the :class:`.Session` can be said
 to have left the "begin" state and entered "transactional" state.   For each
-:class:`.Engine` encountered, a :class:`.Connection` is associated with it,
-which is acquired via the :meth:`.Engine.contextual_connect` method.  If a
-:class:`.Connection` was directly associated with the :class:`.Session` (see :ref:`session_external_transaction`
+:class:`_engine.Engine` encountered, a :class:`_engine.Connection` is associated with it,
+which is acquired via the :meth:`_engine.Engine.contextual_connect` method.  If a
+:class:`_engine.Connection` was directly associated with the :class:`.Session` (see :ref:`session_external_transaction`
 for an example of this), it is
 added to the transactional state directly.
 
-For each :class:`.Connection`, the :class:`.Session` also maintains a :class:`.Transaction` object,
-which is acquired by calling :meth:`.Connection.begin` on each :class:`.Connection`,
-or if the :class:`.Session`
-object has been established using the flag ``twophase=True``, a :class:`.TwoPhaseTransaction`
-object acquired via :meth:`.Connection.begin_twophase`.  These transactions are all committed or
-rolled back corresponding to the invocation of the
-:meth:`.Session.commit` and :meth:`.Session.rollback` methods.   A commit operation will
-also call the :meth:`.TwoPhaseTransaction.prepare` method on all transactions if applicable.
+For each :class:`_engine.Connection`, the :class:`.Session` also maintains a
+:class:`.Transaction` object, which is acquired by calling
+:meth:`_engine.Connection.begin` on each :class:`_engine.Connection`, or if the
+:class:`.Session` object has been established using the flag ``twophase=True``,
+a :class:`.TwoPhaseTransaction` object acquired via
+:meth:`_engine.Connection.begin_twophase`.  These transactions are all
+committed or rolled back corresponding to the invocation of the
+:meth:`.Session.commit` and :meth:`.Session.rollback` methods.   A commit
+operation will also call the :meth:`.TwoPhaseTransaction.prepare` method on
+all transactions if applicable.
 
-When the transactional state is completed after a rollback or commit, the :class:`.Session`
-:term:`releases` all :class:`.Transaction` and :class:`.Connection` resources,
-and goes back to the "begin" state, which
-will again invoke new :class:`.Connection` and :class:`.Transaction` objects as new
+When the transactional state is completed after a rollback or commit, the
+:class:`.Session`
+:term:`releases` all :class:`.Transaction` and :class:`_engine.Connection`
+resources, and goes back to the "begin" state, which will again invoke new
+:class:`_engine.Connection` and :class:`.Transaction` objects as new
 requests to emit SQL statements are received.
 
 The example below illustrates this lifecycle::
@@ -84,6 +87,8 @@ The example below illustrates this lifecycle::
         # user-defined event handler), .close() will ensure that
         # invalid state is removed.
         session.close()
+
+
 
 .. _session_begin_nested:
 
@@ -141,6 +146,17 @@ things like unique constraint exceptions::
 Autocommit Mode
 ---------------
 
+.. deprecated::  1.4
+
+    "autocommit" mode is a **legacy mode of use** and should not be considered
+    for new projects.  The feature will be deprecated in SQLAlchemy 1.4 and
+    removed in version 2.0; both versions provide a more refined
+    "autobegin" approach that allows the :meth:`.Session.begin` method
+    to be used normally.   If autocommit mode is used, it is strongly
+    advised that the application at least ensure that transaction scope is made
+    present via the :meth:`.Session.begin` method, rather than using the
+    session in pure autocommit mode.
+
 The examples of session lifecycle at :ref:`unitofwork_transaction` refer
 to a :class:`.Session` that runs in its default mode of ``autocommit=False``.
 In this mode, the :class:`.Session` begins new transactions automatically
@@ -158,20 +174,6 @@ methods like :meth:`.Session.execute` as well as when executing a query
 returned by :meth:`.Session.query`.  For a flush operation, the :class:`.Session`
 starts a new transaction for the duration of the flush, and commits it when
 complete.
-
-.. warning::
-
-    "autocommit" mode is a **legacy mode of use** and should not be
-    considered for new projects.   If autocommit mode is used, it is strongly
-    advised that the application at least ensure that transaction scope
-    is made present via the :meth:`.Session.begin` method, rather than
-    using the session in pure autocommit mode.
-
-    If the :meth:`.Session.begin` method is not used, and operations are allowed
-    to proceed using ad-hoc connections with immediate autocommit, then the
-    application probably should set ``autoflush=False, expire_on_commit=False``,
-    since these features are intended to be used only within the context
-    of a database transaction.
 
 Modern usage of "autocommit mode" tends to be for framework integrations that
 wish to control specifically when the "begin" state occurs.  A session which is
@@ -210,18 +212,26 @@ compatible with the ``with`` statement::
 Using Subtransactions with Autocommit
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A subtransaction indicates usage of the :meth:`.Session.begin` method in conjunction with
-the ``subtransactions=True`` flag.  This produces a non-transactional, delimiting construct that
-allows nesting of calls to :meth:`~.Session.begin` and :meth:`~.Session.commit`.
-Its purpose is to allow the construction of code that can function within a transaction
-both independently of any external code that starts a transaction,
-as well as within a block that has already demarcated a transaction.
+.. deprecated:: 1.4 The :paramref:`.Session.begin.subtransactions`
+   flag will be deprecated in SQLAlchemy 1.4 and removed in SQLAlchemy 2.0.
+   For background on migrating away from the "subtransactions" pattern
+   see the next section :ref:`session_subtransactions_migrating`.
+
+A subtransaction indicates usage of the :meth:`.Session.begin` method in
+conjunction with the :paramref:`.Session.begin.subtransactions` flag set to
+``True``.  This produces a
+non-transactional, delimiting construct that allows nesting of calls to
+:meth:`~.Session.begin` and :meth:`~.Session.commit`. Its purpose is to allow
+the construction of code that can function within a transaction both
+independently of any external code that starts a transaction, as well as within
+a block that has already demarcated a transaction.
 
 ``subtransactions=True`` is generally only useful in conjunction with
-autocommit, and is equivalent to the pattern described at :ref:`connections_nested_transactions`,
-where any number of functions can call :meth:`.Connection.begin` and :meth:`.Transaction.commit`
-as though they are the initiator of the transaction, but in fact may be participating
-in an already ongoing transaction::
+autocommit, and is equivalent to the pattern described at
+:ref:`connections_nested_transactions`, where any number of functions can call
+:meth:`_engine.Connection.begin` and :meth:`.Transaction.commit` as though they
+are the initiator of the transaction, but in fact may be participating in an
+already ongoing transaction::
 
     # method_a starts a transaction and calls method_b
     def method_a(session):
@@ -251,11 +261,98 @@ in an already ongoing transaction::
     method_a(session)
     session.close()
 
-Subtransactions are used by the :meth:`.Session.flush` process to ensure that the
-flush operation takes place within a transaction, regardless of autocommit.   When
-autocommit is disabled, it is still useful in that it forces the :class:`.Session`
-into a "pending rollback" state, as a failed flush cannot be resumed in mid-operation,
-where the end user still maintains the "scope" of the transaction overall.
+Subtransactions are used by the :meth:`.Session.flush` process to ensure that
+the flush operation takes place within a transaction, regardless of autocommit.
+When autocommit is disabled, it is still useful in that it forces the
+:class:`.Session` into a "pending rollback" state, as a failed flush cannot be
+resumed in mid-operation, where the end user still maintains the "scope" of the
+transaction overall.
+
+.. _session_subtransactions_migrating:
+
+Migrating from the "subtransaction" pattern
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The "subtransaction" pattern will be deprecated in SQLAlchemy 1.4 and removed
+in version 2.0 as a public API.  This pattern has been shown to be confusing in
+real world applications, and it is preferable for an application to ensure that
+the top-most level of database operations are performed with a single
+begin/commit pair.
+
+To provide backwards compatibility for applications that make use of this
+pattern, the following context manager or a similar implementation based on
+a decorator may be used.  It relies on autocommit mode within SQLAlchemy
+1.3 but not in SQLAlchemy 1.4::
+
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def transaction(session):
+        assert session.autocommit, (
+            "this pattern expects the session to be in autocommit mode. "
+            "This assertion can be removed for SQLAlchemy 1.4."
+        )
+        if not session.transaction:
+            with session.begin():
+                yield
+        else:
+            yield
+
+
+The above context manager may be used in the same way the
+"subtransaction" flag works, such as in the following example::
+
+
+    # method_a starts a transaction and calls method_b
+    def method_a(session):
+        with transaction(session):
+            method_b(session)
+
+    # method_b also starts a transaction, but when
+    # called from method_a participates in the ongoing
+    # transaction.
+    def method_b(session):
+        with transaction(session):
+            session.add(SomeObject('bat', 'lala'))
+
+    Session = sessionmaker(engine, autocommit=True)
+
+    # create a Session and call method_a
+    session = Session()
+    try:
+        method_a(session)
+    finally:
+        session.close()
+
+To compare towards the preferred idiomatic pattern, the begin block should
+be at the outermost level.  This removes the need for individual functions
+or methods to be concerned with the details of transaction demarcation::
+
+    def method_a(session):
+        method_b(session)
+
+    def method_b(session):
+        session.add(SomeObject('bat', 'lala'))
+
+    Session = sessionmaker(engine)
+
+    # create a Session and call method_a
+    session = Session()
+    try:
+        # Session "begins" the transaction automatically, so the
+        # .transaction attribute may be used as a context manager.
+        with session.transaction:
+            method_a(session)
+    finally:
+        session.close()
+
+SQLAlchemy 1.4 will feature an improved API for the above transactional
+patterns.
+
+.. seealso::
+
+    :ref:`connections_subtransactions` - similar pattern based on Core only
 
 .. _session_twophase:
 
@@ -289,52 +386,91 @@ transactions set the flag ``twophase=True`` on the session::
 
 .. _session_transaction_isolation:
 
-Setting Transaction Isolation Levels
-------------------------------------
+Setting Transaction Isolation Levels / DBAPI AUTOCOMMIT
+-------------------------------------------------------
 
-:term:`Isolation` refers to the behavior of the transaction at the database
-level in relation to other transactions occurring concurrently.  There
-are four well-known modes of isolation, and typically the Python DBAPI
-allows these to be set on a per-connection basis, either through explicit
-APIs or via database-specific calls.
+Most DBAPIs support the concept of configurable transaction :term:`isolation` levels.
+These are traditionally the four levels "READ UNCOMMITTED", "READ COMMITTED",
+"REPEATABLE READ" and "SERIALIZABLE".  These are usually applied to a
+DBAPI connection before it begins a new transaction, noting that most
+DBAPIs will begin this transaction implicitly when SQL statements are first
+emitted.
 
-SQLAlchemy's dialects support settable isolation modes on a per-:class:`.Engine`
-or per-:class:`.Connection` basis, using flags at both the
-:func:`.create_engine` level as well as at the :meth:`.Connection.execution_options`
+DBAPIs that support isolation levels also usually support the concept of true
+"autocommit", which means that the DBAPI connection itself will be placed into
+a non-transactional autocommit mode.   This usually means that the typical
+DBAPI behavior of emitting "BEGIN" to the database automatically no longer
+occurs, but it may also include other directives.   When using this mode,
+**the DBAPI does not use a transaction under any circumstances**.  SQLAlchemy
+methods like ``.begin()``, ``.commit()`` and ``.rollback()`` pass silently.
+
+SQLAlchemy's dialects support settable isolation modes on a per-:class:`_engine.Engine`
+or per-:class:`_engine.Connection` basis, using flags at both the
+:func:`_sa.create_engine` level as well as at the :meth:`_engine.Connection.execution_options`
 level.
 
 When using the ORM :class:`.Session`, it acts as a *facade* for engines and
 connections, but does not expose transaction isolation directly.  So in
 order to affect transaction isolation level, we need to act upon the
-:class:`.Engine` or :class:`.Connection` as appropriate.
+:class:`_engine.Engine` or :class:`_engine.Connection` as appropriate.
 
-.. seealso::
-
-    :paramref:`.create_engine.isolation_level`
-
-    :ref:`SQLite Transaction Isolation <sqlite_isolation_level>`
-
-    :ref:`PostgreSQL Isolation Level <postgresql_isolation_level>`
-
-    :ref:`MySQL Isolation Level <mysql_isolation_level>`
-
-Setting Isolation Engine-Wide
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Setting Isolation For A Sessionmaker / Engine Wide
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To set up a :class:`.Session` or :class:`.sessionmaker` with a specific
-isolation level globally, use the :paramref:`.create_engine.isolation_level`
-parameter::
+isolation level globally, the first technique is that an
+:class:`_engine.Engine` can be constructed against a specific isolation level
+in all cases, which is then used as the source of connectivity for a
+:class:`_orm.Session` and/or :class:`_orm.sessionmaker`::
 
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
     eng = create_engine(
         "postgresql://scott:tiger@localhost/test",
-        isolation_level='REPEATABLE_READ')
+        isolation_level='REPEATABLE READ'
+    )
 
-    maker = sessionmaker(bind=eng)
+    Session = sessionmaker(eng)
 
-    session = maker()
+
+Another option, useful if there are to be two engines with different isolation
+levels at once, is to use the :meth:`_engine.Engine.execution_options` method,
+which will produce a shallow copy of the original :class:`_engine.Engine` which
+shares the same connection pool as the parent engine.  This is often preferable
+when operations will be separated into "transactional" and "autocommit"
+operations::
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    eng = create_engine("postgresql://scott:tiger@localhost/test")
+
+    autocommit_engine = eng.execution_options(isolation_level="AUTOCOMMIT")
+
+    transactional_session = sessionmaker(eng)
+    autocommit_session = sessionmaker(autocommit_engine)
+
+
+Above, both "``eng``" and ``"autocommit_engine"`` share the same dialect and
+connection pool.  However the "AUTOCOMMIT" mode will be set upon connections
+when they are acquired from the ``autocommit_engine``.  The two
+:class:`_orm.sessionmaker` objects "``transactional_session``" and "``autocommit_session"``
+then inherit these characteristics when they work with database connections.
+
+
+The "``autocommit_session``" **continues to have transactional semantics**,
+including that
+:meth:`_orm.Session.commit` and :meth:`_orm.Session.rollback` still consider
+themselves to be "committing" and "rolling back" objects, however the
+transaction will be silently absent.  For this reason, **it is typical,
+though not strictly required, that a Session with AUTOCOMMIT isolation be
+used in a read-only fashion**, that is::
+
+    session = autocommit_session()
+    some_objects = session.query(cls1).filter(...).all()
+    some_other_objects = session.query(cls2).filter(...).all()
+    session.close()  # closes connection
 
 
 Setting Isolation for Individual Sessions
@@ -343,12 +479,19 @@ Setting Isolation for Individual Sessions
 When we make a new :class:`.Session`, either using the constructor directly
 or when we call upon the callable produced by a :class:`.sessionmaker`,
 we can pass the ``bind`` argument directly, overriding the pre-existing bind.
-We can combine this with the :meth:`.Engine.execution_options` method
-in order to produce a copy of the original :class:`.Engine` that will
-add this option::
+We can for example create our :class:`_orm.Session` from a default
+:class:`.sessionmaker` and pass an engine set for autocommit::
 
-    session = maker(
-        bind=engine.execution_options(isolation_level='SERIALIZABLE'))
+    plain_engine = create_engine("postgresql://scott:tiger@localhost/test")
+
+    autocommit_engine = eng.execution_options(isolation_level="AUTOCOMMIT")
+
+    # will normally use plain_engine
+    Session = sessionmaker(plain_engine)
+
+    # make a specific Session that will use the "autocommit" engine
+    with Session(bind=autocommit_engine) as session:
+        # work with session
 
 For the case where the :class:`.Session` or :class:`.sessionmaker` is
 configured with multiple "binds", we can either re-specify the ``binds``
@@ -356,78 +499,48 @@ argument fully, or if we want to only replace specific binds, we
 can use the :meth:`.Session.bind_mapper` or :meth:`.Session.bind_table`
 methods::
 
-    session = maker()
-    session.bind_mapper(
-        User, user_engine.execution_options(isolation_level='SERIALIZABLE'))
-
-We can also use the individual transaction method that follows.
+    with Session() as session:
+        session.bind_mapper(User, autocommit_engine)
 
 Setting Isolation for Individual Transactions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A key caveat regarding isolation level is that the setting cannot be
-safely modified on a :class:`.Connection` where a transaction has already
+safely modified on a :class:`_engine.Connection` where a transaction has already
 started.  Databases cannot change the isolation level of a transaction
 in progress, and some DBAPIs and SQLAlchemy dialects
-have inconsistent behaviors in this area.  Some may implicitly emit a
-ROLLBACK and some may implicitly emit a COMMIT, others may ignore the setting
-until the next transaction.  Therefore SQLAlchemy emits a warning if this
-option is set when a transaction is already in play.  The :class:`.Session`
-object does not provide for us a :class:`.Connection` for use in a transaction
-where the transaction is not already begun.  So here, we need to pass
-execution options to the :class:`.Session` at the start of a transaction
-by passing :paramref:`.Session.connection.execution_options`
-provided by the :meth:`.Session.connection` method::
+have inconsistent behaviors in this area.
+
+Therefore it is preferable to use a :class:`_orm.Session` that is up front
+bound to an engine with the desired isolation level.  However, the isolation
+level on a per-connection basis can be affected by using the
+:meth:`_orm.Session.connection` method at the start of a transaction::
 
     from sqlalchemy.orm import Session
 
+    # assume session just constructed
     sess = Session(bind=engine)
+
+    # call connection() with options before any other operations proceed.
+    # this will procure a new connection from the bound engine and begin a real
+    # database transaction.
     sess.connection(execution_options={'isolation_level': 'SERIALIZABLE'})
 
-    # work with session
+    # ... work with session in SERIALIZABLE isolation level...
 
     # commit transaction.  the connection is released
     # and reverted to its previous isolation level.
     sess.commit()
+
+    # here, a new "transaction" is in play and isolation level may be set
+    # again if another transaction is to be used
 
 Above, we first produce a :class:`.Session` using either the constructor
 or a :class:`.sessionmaker`.   Then we explicitly set up the start of
 a transaction by calling upon :meth:`.Session.connection`, which provides
 for execution options that will be passed to the connection before the
-transaction is begun.   If we are working with a :class:`.Session` that
-has multiple binds or some other custom scheme for :meth:`.Session.get_bind`,
-we can pass additional arguments to :meth:`.Session.connection` in order to
-affect how the bind is procured::
+transaction is begun.
 
-    sess = my_sesssionmaker()
-
-    # set up a transaction for the bind associated with
-    # the User mapper
-    sess.connection(
-        mapper=User,
-        execution_options={'isolation_level': 'SERIALIZABLE'})
-
-    # work with session
-
-    # commit transaction.  the connection is released
-    # and reverted to its previous isolation level.
-    sess.commit()
-
-The :paramref:`.Session.connection.execution_options` argument is only
-accepted on the **first** call to :meth:`.Session.connection` for a
-particular bind within a transaction.  If a transaction is already begun
-on the target connection, a warning is emitted::
-
-    >>> session = Session(eng)
-    >>> session.execute("select 1")
-    <sqlalchemy.engine.result.ResultProxy object at 0x1017a6c50>
-    >>> session.connection(execution_options={'isolation_level': 'SERIALIZABLE'})
-    sqlalchemy/orm/session.py:310: SAWarning: Connection is already established
-    for the given bind; execution_options ignored
-
-.. versionadded:: 0.9.9 Added the
-    :paramref:`.Session.connection.execution_options`
-    parameter to :meth:`.Session.connection`.
 
 Tracking Transaction State with Events
 --------------------------------------
@@ -440,10 +553,10 @@ of the available event hooks for session transaction state changes.
 Joining a Session into an External Transaction (such as for test suites)
 ========================================================================
 
-If a :class:`.Connection` is being used which is already in a transactional
+If a :class:`_engine.Connection` is being used which is already in a transactional
 state (i.e. has a :class:`.Transaction` established), a :class:`.Session` can
 be made to participate within that transaction by just binding the
-:class:`.Session` to that :class:`.Connection`. The usual rationale for this
+:class:`.Session` to that :class:`_engine.Connection`. The usual rationale for this
 is a test suite that allows ORM code to work freely with a :class:`.Session`,
 including the ability to call :meth:`.Session.commit`, where afterwards the
 entire database interaction is rolled back::
@@ -487,7 +600,7 @@ entire database interaction is rolled back::
 
 Above, we issue :meth:`.Session.commit` as well as
 :meth:`.Transaction.rollback`. This is an example of where we take advantage
-of the :class:`.Connection` object's ability to maintain *subtransactions*, or
+of the :class:`_engine.Connection` object's ability to maintain *subtransactions*, or
 nested begin/commit-or-rollback pairs where only the outermost begin/commit
 pair actually commits the transaction, or if the outermost block rolls back,
 everything is rolled back.

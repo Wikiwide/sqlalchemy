@@ -25,9 +25,11 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
+from sqlalchemy.testing.assertsql import AllOf
+from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -433,7 +435,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
     def test_orderby_related(self):
         """A regular mapper select on a single table can
-            order by a relationship to a second table"""
+        order by a relationship to a second table"""
 
         Address, addresses, users, User = (
             self.classes.Address,
@@ -1165,11 +1167,92 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
         def go():
             a = q.filter(addresses.c.id == 1).one()
-            is_not_(a.user, None)
+            is_not(a.user, None)
             u1 = sess.query(User).get(7)
             is_(a.user, u1)
 
         self.assert_sql_count(testing.db, go, 2)
+
+    def test_m2o_none_value_present(self):
+        orders, Order, addresses, Address = (
+            self.tables.orders,
+            self.classes.Order,
+            self.tables.addresses,
+            self.classes.Address,
+        )
+
+        mapper(
+            Order,
+            orders,
+            properties={"address": relationship(Address, lazy="selectin")},
+        )
+        mapper(Address, addresses)
+
+        sess = create_session()
+        q = sess.query(Order).filter(Order.id.in_([4, 5])).order_by(Order.id)
+
+        o4, o5 = q.all()
+        assert o4.__dict__["address"] is not None
+        assert o5.__dict__["address"] is None
+
+        # test overwrite
+
+        o5.address = Address()
+        sess.query(Order).filter(Order.id.in_([4, 5])).order_by(Order.id).all()
+        assert o5.__dict__["address"] is not None
+
+        o5.address = Address()
+        sess.query(Order).populate_existing().filter(
+            Order.id.in_([4, 5])
+        ).order_by(Order.id).all()
+        assert o5.__dict__["address"] is None
+
+    def test_m2o_uselist_none_value_present(self):
+        orders, Order, addresses, Address = (
+            self.tables.orders,
+            self.classes.Order,
+            self.tables.addresses,
+            self.classes.Address,
+        )
+
+        mapper(
+            Order,
+            orders,
+            properties={
+                "address": relationship(Address, lazy="selectin", uselist=True)
+            },
+        )
+        mapper(Address, addresses)
+
+        sess = create_session()
+        q = sess.query(Order).filter(Order.id.in_([4, 5])).order_by(Order.id)
+
+        o4, o5 = q.all()
+        assert len(o4.__dict__["address"])
+        eq_(o5.__dict__["address"], [])
+
+    def test_o2m_empty_list_present(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), lazy="selectin"
+                )
+            ),
+        )
+        q = create_session().query(User)
+        result = q.filter(users.c.id == 10).all()
+        u1 = result[0]
+
+        eq_(u1.__dict__["addresses"], [])
 
     def test_double_with_aggregate(self):
         User, users, orders, Order = (
@@ -1592,7 +1675,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
         mapper(Paperwork, paperwork)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
 
         e1 = Engineer(primary_language="java")
         e2 = Engineer(primary_language="c++")
@@ -1601,7 +1684,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
             Paperwork(description="tps report #2"),
         ]
         e2.paperwork = [Paperwork(description="tps report #3")]
-        sess = create_session()
+        sess = create_session(connection)
         sess.add_all([e1, e2])
         sess.flush()
 
@@ -1643,7 +1726,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
                 "IN ([EXPANDING_primary_keys]) "
-                "ORDER BY paperwork.person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
         )
@@ -1693,7 +1776,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
                 "IN ([EXPANDING_primary_keys]) "
-                "ORDER BY paperwork.person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
         )
@@ -1739,7 +1822,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
                 "IN ([EXPANDING_primary_keys]) "
-                "ORDER BY paperwork.person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
         )
@@ -1793,7 +1876,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
                 "IN ([EXPANDING_primary_keys]) "
-                "ORDER BY paperwork.person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
         )
@@ -1841,7 +1924,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
                 "IN ([EXPANDING_primary_keys]) "
-                "ORDER BY paperwork.person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
         )
@@ -1899,7 +1982,7 @@ class HeterogeneousSubtypesTest(fixtures.DeclarativeMappedTest):
             name = Column(String(50))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Company, Programmer, Manager, GolfSwing, Language = cls.classes(
             "Company", "Programmer", "Manager", "GolfSwing", "Language"
         )
@@ -1923,7 +2006,7 @@ class HeterogeneousSubtypesTest(fixtures.DeclarativeMappedTest):
                 ),
             ],
         )
-        sess = Session()
+        sess = Session(connection)
         sess.add_all([c1, c2])
         sess.commit()
 
@@ -2025,10 +2108,10 @@ class TupleTest(fixtures.DeclarativeMappedTest):
             )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B = cls.classes("A", "B")
 
-        session = Session()
+        session = Session(connection)
         session.add_all(
             [
                 A(id1=i, id2=i + 2, bs=[B(id=(i * 6) + j) for j in range(6)])
@@ -2061,7 +2144,7 @@ class TupleTest(fixtures.DeclarativeMappedTest):
             CompiledSQL(
                 "SELECT b.a_id1 AS b_a_id1, b.a_id2 AS b_a_id2, b.id AS b_id "
                 "FROM b WHERE (b.a_id1, b.a_id2) IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.a_id1, b.a_id2, b.id",
+                "([EXPANDING_primary_keys]) ORDER BY b.id",
                 [{"primary_keys": [(i, i + 2) for i in range(1, 20)]}],
             ),
         )
@@ -2133,10 +2216,10 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
             a = relationship("A", back_populates="bs")
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B = cls.classes("A", "B")
 
-        session = Session()
+        session = Session(connection)
         session.add_all(
             [
                 A(id=i, bs=[B(id=(i * 6) + j) for j in range(1, 6)])
@@ -2166,19 +2249,19 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
             CompiledSQL(
                 "SELECT b.a_id AS b_a_id, b.id AS b_id "
                 "FROM b WHERE b.a_id IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.a_id, b.id",
+                "([EXPANDING_primary_keys]) ORDER BY b.id",
                 {"primary_keys": list(range(1, 48))},
             ),
             CompiledSQL(
                 "SELECT b.a_id AS b_a_id, b.id AS b_id "
                 "FROM b WHERE b.a_id IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.a_id, b.id",
+                "([EXPANDING_primary_keys]) ORDER BY b.id",
                 {"primary_keys": list(range(48, 95))},
             ),
             CompiledSQL(
                 "SELECT b.a_id AS b_a_id, b.id AS b_id "
                 "FROM b WHERE b.a_id IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.a_id, b.id",
+                "([EXPANDING_primary_keys]) ORDER BY b.id",
                 {"primary_keys": list(range(95, 101))},
             ),
         )
@@ -2367,9 +2450,9 @@ class SubRelationFromJoinedSubclassMultiLevelTest(_Polymorphic):
         mapper(MachineType, machine_type)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         c1 = cls._fixture()
-        sess = create_session()
+        sess = create_session(connection)
         sess.add(c1)
         sess.flush()
 
@@ -2745,10 +2828,10 @@ class SelfRefInheritanceAliasedTest(
             __mapper_args__ = {"polymorphic_identity": "bar"}
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Foo, Bar = cls.classes("Foo", "Bar")
 
-        session = Session()
+        session = Session(connection)
         target = Bar(id=1)
         b1 = Bar(id=2, foo=Foo(id=3, foo=target))
         session.add(b1)
@@ -2757,40 +2840,40 @@ class SelfRefInheritanceAliasedTest(
     def test_twolevel_selectin_w_polymorphic(self):
         Foo, Bar = self.classes("Foo", "Bar")
 
-        r = with_polymorphic(Foo, "*", aliased=True)
-        attr1 = Foo.foo.of_type(r)
-        attr2 = r.foo
+        for count in range(3):
+            r = with_polymorphic(Foo, "*", aliased=True)
+            attr1 = Foo.foo.of_type(r)
+            attr2 = r.foo
 
-        s = Session()
-        q = (
-            s.query(Foo)
-            .filter(Foo.id == 2)
-            .options(selectinload(attr1).selectinload(attr2))
-        )
-        results = self.assert_sql_execution(
-            testing.db,
-            q.all,
-            CompiledSQL(
-                "SELECT foo.id AS foo_id_1, foo.type AS foo_type, "
-                "foo.foo_id AS foo_foo_id FROM foo WHERE foo.id = :id_1",
-                [{"id_1": 2}],
-            ),
-            CompiledSQL(
-                "SELECT foo_1.id AS foo_1_id, "
-                "foo_1.type AS foo_1_type, foo_1.foo_id AS foo_1_foo_id "
-                "FROM foo AS foo_1 "
-                "WHERE foo_1.id IN ([EXPANDING_primary_keys])",
-                {"primary_keys": [3]},
-            ),
-            CompiledSQL(
-                "SELECT foo_1.id AS foo_1_id, "
-                "foo_1.type AS foo_1_type, foo_1.foo_id AS foo_1_foo_id "
-                "FROM foo AS foo_1 "
-                "WHERE foo_1.id IN ([EXPANDING_primary_keys])",
-                {"primary_keys": [1]},
-            ),
-        )
-        eq_(results, [Bar(id=2, foo=Foo(id=3, foo=Bar(id=1)))])
+            s = Session()
+            q = (
+                s.query(Foo)
+                .filter(Foo.id == 2)
+                .options(selectinload(attr1).selectinload(attr2))
+            )
+            results = self.assert_sql_execution(
+                testing.db,
+                q.all,
+                CompiledSQL(
+                    "SELECT foo.id AS foo_id_1, foo.type AS foo_type, "
+                    "foo.foo_id AS foo_foo_id FROM foo WHERE foo.id = :id_1",
+                    [{"id_1": 2}],
+                ),
+                CompiledSQL(
+                    "SELECT foo_1.id AS foo_1_id, "
+                    "foo_1.type AS foo_1_type, foo_1.foo_id AS foo_1_foo_id "
+                    "FROM foo AS foo_1 "
+                    "WHERE foo_1.id IN ([EXPANDING_primary_keys])",
+                    {"primary_keys": [3]},
+                ),
+                CompiledSQL(
+                    "SELECT foo.id AS foo_id_1, foo.type AS foo_type, "
+                    "foo.foo_id AS foo_foo_id FROM foo "
+                    "WHERE foo.id IN ([EXPANDING_primary_keys])",
+                    {"primary_keys": [1]},
+                ),
+            )
+            eq_(results, [Bar(id=2, foo=Foo(id=3, foo=Bar(id=1)))])
 
 
 class TestExistingRowPopulation(fixtures.DeclarativeMappedTest):
@@ -2850,12 +2933,12 @@ class TestExistingRowPopulation(fixtures.DeclarativeMappedTest):
             id = Column(Integer, primary_key=True)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, A2, B, C1o2m, C2o2m, C1m2o, C2m2o = cls.classes(
             "A", "A2", "B", "C1o2m", "C2o2m", "C1m2o", "C2m2o"
         )
 
-        s = Session()
+        s = Session(connection)
 
         b = B(
             c1_o2m=[C1o2m()], c2_o2m=[C2o2m()], c1_m2o=C1m2o(), c2_m2o=C2m2o()
@@ -2932,15 +3015,15 @@ class SingleInhSubclassTest(
             user_id = Column(Integer, ForeignKey("user.id"))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         EmployerUser, Role = cls.classes("EmployerUser", "Role")
 
-        s = Session()
+        s = Session(connection)
         s.add(EmployerUser(roles=[Role(), Role(), Role()]))
         s.commit()
 
     def test_load(self):
-        EmployerUser, = self.classes("EmployerUser")
+        (EmployerUser,) = self.classes("EmployerUser")
         s = Session()
 
         q = s.query(EmployerUser)
@@ -2956,7 +3039,7 @@ class SingleInhSubclassTest(
             CompiledSQL(
                 "SELECT role.user_id AS role_user_id, role.id AS role_id "
                 "FROM role WHERE role.user_id "
-                "IN ([EXPANDING_primary_keys]) ORDER BY role.user_id",
+                "IN ([EXPANDING_primary_keys])",
                 {"primary_keys": [1]},
             ),
         )
@@ -2983,10 +3066,10 @@ class MissingForeignTest(
             y = Column(Integer)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B = cls.classes("A", "B")
 
-        s = Session()
+        s = Session(connection)
         b1, b2 = B(id=1, x=5, y=9), B(id=2, x=10, y=8)
         s.add_all(
             [
@@ -3027,6 +3110,7 @@ class M2OWDegradeTest(
             id = Column(Integer, primary_key=True)
             b_id = Column(ForeignKey("b.id"))
             b = relationship("B")
+            b_no_omit_join = relationship("B", omit_join=False)
             q = Column(Integer)
 
         class B(fixtures.ComparableEntity, Base):
@@ -3036,10 +3120,10 @@ class M2OWDegradeTest(
             y = Column(Integer)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B = cls.classes("A", "B")
 
-        s = Session()
+        s = Session(connection)
         b1, b2 = B(id=1, x=5, y=9), B(id=2, x=10, y=8)
         s.add_all(
             [
@@ -3051,6 +3135,13 @@ class M2OWDegradeTest(
             ]
         )
         s.commit()
+
+    def test_omit_join_warn_on_true(self):
+        with testing.expect_warnings(
+            "setting omit_join to True is not supported; selectin "
+            "loading of this relationship"
+        ):
+            relationship("B", omit_join=True)
 
     def test_use_join_parent_criteria(self):
         A, B = self.classes("A", "B")
@@ -3106,7 +3197,7 @@ class M2OWDegradeTest(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id, b.x AS b_x, "
                 "b.y AS b_y "
                 "FROM a AS a_1 JOIN b ON b.id = a_1.b_id "
-                "WHERE a_1.id IN ([EXPANDING_primary_keys]) ORDER BY a_1.id",
+                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
                 [{"primary_keys": [1, 3]}],
             ),
         )
@@ -3147,6 +3238,38 @@ class M2OWDegradeTest(
             ],
         )
 
+    def test_use_join_omit_join_false(self):
+        A, B = self.classes("A", "B")
+        s = Session()
+        q = s.query(A).options(selectinload(A.b_no_omit_join)).order_by(A.id)
+        results = self.assert_sql_execution(
+            testing.db,
+            q.all,
+            CompiledSQL(
+                "SELECT a.id AS a_id, a.b_id AS a_b_id, a.q AS a_q "
+                "FROM a ORDER BY a.id",
+                [{}],
+            ),
+            CompiledSQL(
+                "SELECT a_1.id AS a_1_id, b.id AS b_id, b.x AS b_x, "
+                "b.y AS b_y FROM a AS a_1 JOIN b ON b.id = a_1.b_id "
+                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
+                [{"primary_keys": [1, 2, 3, 4, 5]}],
+            ),
+        )
+
+        b1, b2 = B(id=1, x=5, y=9), B(id=2, x=10, y=8)
+        eq_(
+            results,
+            [
+                A(id=1, b_no_omit_join=b1),
+                A(id=2, b_no_omit_join=b2),
+                A(id=3, b_no_omit_join=b2),
+                A(id=4, b_no_omit_join=None),
+                A(id=5, b_no_omit_join=b1),
+            ],
+        )
+
     def test_use_join_parent_degrade_on_defer(self):
         A, B = self.classes("A", "B")
         s = Session()
@@ -3165,7 +3288,7 @@ class M2OWDegradeTest(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id, b.x AS b_x, "
                 "b.y AS b_y "
                 "FROM a AS a_1 JOIN b ON b.id = a_1.b_id "
-                "WHERE a_1.id IN ([EXPANDING_primary_keys]) ORDER BY a_1.id",
+                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
                 [{"primary_keys": [1, 2, 3, 4, 5]}],
             ),
         )
@@ -3181,3 +3304,185 @@ class M2OWDegradeTest(
                 A(id=5, b=b1),
             ],
         )
+
+
+class SameNamePolymorphicTest(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class GenericParent(Base):
+            __tablename__ = "generic_parent"
+            id = Column(Integer, primary_key=True)
+            type = Column(String(50), nullable=False)
+
+            __mapper_args__ = {
+                "polymorphic_on": type,
+                "polymorphic_identity": "generic_parent",
+            }
+
+        class ParentA(GenericParent):
+            __tablename__ = "parent_a"
+
+            id = Column(
+                Integer, ForeignKey("generic_parent.id"), primary_key=True
+            )
+            children = relationship("ChildA", back_populates="parent")
+
+            __mapper_args__ = {"polymorphic_identity": "parent_a"}
+
+        class ParentB(GenericParent):
+            __tablename__ = "parent_b"
+
+            id = Column(
+                Integer, ForeignKey("generic_parent.id"), primary_key=True
+            )
+            children = relationship("ChildB", back_populates="parent")
+
+            __mapper_args__ = {"polymorphic_identity": "parent_b"}
+
+        class ChildA(Base):
+            __tablename__ = "child_a"
+            id = Column(Integer, primary_key=True)
+            parent_id = Column(
+                Integer, ForeignKey("parent_a.id"), nullable=False
+            )
+            parent = relationship("ParentA", back_populates="children")
+
+        class ChildB(Base):
+            __tablename__ = "child_b"
+
+            id = Column(Integer, primary_key=True)
+            parent_id = Column(
+                Integer, ForeignKey("parent_b.id"), nullable=False
+            )
+            parent = relationship("ParentB", back_populates="children")
+
+    @classmethod
+    def insert_data(cls, connection):
+        ParentA, ParentB, ChildA, ChildB = cls.classes(
+            "ParentA", "ParentB", "ChildA", "ChildB"
+        )
+        session = Session(connection)
+        parent_a = ParentA(id=1)
+        parent_b = ParentB(id=2)
+        for i in range(10):
+            parent_a.children.append(ChildA())
+            parent_b.children.append(ChildB())
+        session.add_all([parent_a, parent_b])
+
+        session.commit()
+
+    def test_load_both_wpoly(self):
+        GenericParent, ParentA, ParentB, ChildA, ChildB = self.classes(
+            "GenericParent", "ParentA", "ParentB", "ChildA", "ChildB"
+        )
+        session = Session()
+
+        parent_types = with_polymorphic(GenericParent, [ParentA, ParentB])
+
+        with assert_engine(testing.db) as asserter_:
+            session.query(parent_types).options(
+                selectinload(parent_types.ParentA.children),
+                selectinload(parent_types.ParentB.children),
+            ).all()
+
+        asserter_.assert_(
+            CompiledSQL(
+                "SELECT generic_parent.id AS generic_parent_id, "
+                "generic_parent.type AS generic_parent_type, "
+                "parent_a.id AS parent_a_id, parent_b.id AS parent_b_id "
+                "FROM generic_parent LEFT OUTER JOIN parent_a "
+                "ON generic_parent.id = parent_a.id LEFT OUTER JOIN parent_b "
+                "ON generic_parent.id = parent_b.id"
+            ),
+            AllOf(
+                CompiledSQL(
+                    "SELECT child_a.parent_id AS child_a_parent_id, "
+                    "child_a.id AS child_a_id FROM child_a "
+                    "WHERE child_a.parent_id IN ([EXPANDING_primary_keys])",
+                    [{"primary_keys": [1]}],
+                ),
+                CompiledSQL(
+                    "SELECT child_b.parent_id AS child_b_parent_id, "
+                    "child_b.id AS child_b_id FROM child_b "
+                    "WHERE child_b.parent_id IN ([EXPANDING_primary_keys])",
+                    [{"primary_keys": [2]}],
+                ),
+            ),
+        )
+
+
+class TestBakedCancelsCorrectly(fixtures.DeclarativeMappedTest):
+    # test issue #5303
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class User(Base):
+            __tablename__ = "users"
+
+            id = Column(Integer, primary_key=True)
+
+        class Foo(Base):
+            __tablename__ = "foos"
+            __mapper_args__ = {"polymorphic_on": "type"}
+
+            id = Column(Integer, primary_key=True)
+            type = Column(String(50), nullable=False)
+
+        class SubFoo(Foo):
+            __tablename__ = "foos_sub"
+            __mapper_args__ = {"polymorphic_identity": "USER"}
+
+            id = Column(Integer, ForeignKey("foos.id"), primary_key=True)
+            user_id = Column(Integer, ForeignKey("users.id"))
+            user = relationship("User")
+
+        class Bar(Base):
+            __tablename__ = "bars"
+
+            id = Column(Integer, primary_key=True)
+            foo_id = Column(Integer, ForeignKey("foos.id"))
+            foo = relationship("Foo", cascade="all", uselist=False)
+
+    @classmethod
+    def insert_data(cls, connection):
+        User, Bar, SubFoo = cls.classes("User", "Bar", "SubFoo")
+
+        session = Session(connection)
+
+        user = User()
+        sub_foo = SubFoo(user=user)
+        sub_sub_bar = Bar(foo=sub_foo)
+        session.add_all([user, sub_foo, sub_sub_bar])
+        session.commit()
+
+    def test_option_accepted_each_time(self):
+        Foo, User, Bar, SubFoo = self.classes("Foo", "User", "Bar", "SubFoo")
+
+        def go():
+            # in this test, the loader options cancel caching because
+            # the with_polymorphic() can't be cached, and this actually
+            # fails because it won't match up to the with_polymorphic
+            # used in the query if the query is in fact cached.  however
+            # the cache spoil did not use full=True which kept the lead
+            # entities around.
+
+            sess = Session()
+            foo_polymorphic = with_polymorphic(Foo, [SubFoo], aliased=True)
+
+            credit_adjustment_load = selectinload(
+                Bar.foo.of_type(foo_polymorphic)
+            )
+            user_load = credit_adjustment_load.joinedload(
+                foo_polymorphic.SubFoo.user
+            )
+            query = sess.query(Bar).options(user_load)
+            ledger_entry = query.first()
+            ledger_entry.foo.user
+
+        self.assert_sql_count(testing.db, go, 2)
+        self.assert_sql_count(testing.db, go, 2)
+        self.assert_sql_count(testing.db, go, 2)

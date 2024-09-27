@@ -4,6 +4,7 @@
 /build/
 /dist/
 /doc/build/output/
+/doc/build/_build/
 /dogpile_data/
 *.orig
 *,cover
@@ -17,16 +18,13 @@ coverage.xml
 *.so
 *.patch
 sqlnet.log
-/mapping_setup.py
-/test.py
 /.cache/
 /.mypy_cache
 *.sw[o,p]
-/test?.py
-/test.py
-/mapping_setup.py
 *.rej
 test/test_schema.db
 *test_schema.db
 .idea
 /Pipfile*
+/querytest.db
+/.vscode

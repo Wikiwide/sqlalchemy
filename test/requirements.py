@@ -5,13 +5,16 @@
 
 import sys
 
+from sqlalchemy import exc
 from sqlalchemy import util
+from sqlalchemy.sql import text
 from sqlalchemy.testing import exclusions
 from sqlalchemy.testing.exclusions import against
 from sqlalchemy.testing.exclusions import fails_if
 from sqlalchemy.testing.exclusions import fails_on
 from sqlalchemy.testing.exclusions import fails_on_everything_except
 from sqlalchemy.testing.exclusions import LambdaPredicate
+from sqlalchemy.testing.exclusions import NotPredicate
 from sqlalchemy.testing.exclusions import only_if
 from sqlalchemy.testing.exclusions import only_on
 from sqlalchemy.testing.exclusions import skip_if
@@ -73,6 +76,14 @@ class DefaultRequirements(SuiteRequirements):
         """Target database must support foreign keys."""
 
         return skip_if(no_support("sqlite", "not supported by database"))
+
+    @property
+    def foreign_key_constraint_name_reflection(self):
+        return fails_if(
+            lambda config: against(config, ["mysql", "mariadb"])
+            and not self._mysql_80(config)
+            and not self._mariadb_105(config)
+        )
 
     @property
     def on_update_cascade(self):
@@ -190,7 +201,9 @@ class DefaultRequirements(SuiteRequirements):
     @property
     def temporary_tables(self):
         """target database supports temporary tables"""
-        return skip_if(["mssql", "firebird"], "not supported (?)")
+        return skip_if(
+            ["mssql", "firebird", self._sqlite_file_db], "not supported (?)"
+        )
 
     @property
     def temp_table_reflection(self):
@@ -256,7 +269,7 @@ class DefaultRequirements(SuiteRequirements):
                 config, "sqlite"
             ) and config.db.dialect.dbapi.sqlite_version_info >= (3, 15, 0)
 
-        return only_on(["mysql", "postgresql", _sqlite_tuple_in])
+        return only_on(["mysql", "postgresql", _sqlite_tuple_in, "oracle"])
 
     @property
     def independent_cursors(self):
@@ -314,19 +327,47 @@ class DefaultRequirements(SuiteRequirements):
     @property
     def isolation_level(self):
         return only_on(
-            ("postgresql", "sqlite", "mysql", "mssql"),
+            ("postgresql", "sqlite", "mysql", "mssql", "oracle"),
             "DBAPI has no isolation level support",
         ) + fails_on(
             "postgresql+pypostgresql",
             "pypostgresql bombs on multiple isolation level calls",
         )
 
+    def get_isolation_levels(self, config):
+        levels = set(config.db.dialect._isolation_lookup)
+
+        if against(config, "sqlite"):
+            default = "SERIALIZABLE"
+            levels.add("AUTOCOMMIT")
+        elif against(config, "postgresql"):
+            default = "READ COMMITTED"
+            levels.add("AUTOCOMMIT")
+        elif against(config, "mysql"):
+            default = "REPEATABLE READ"
+            levels.add("AUTOCOMMIT")
+        elif against(config, "mssql"):
+            default = "READ COMMITTED"
+            levels.add("AUTOCOMMIT")
+        elif against(config, "oracle"):
+            default = "READ COMMITTED"
+            levels.add("AUTOCOMMIT")
+        else:
+            raise NotImplementedError()
+
+        return {"default": default, "supported": levels}
+
+    @property
+    def tuple_in_w_empty(self):
+        return self.tuple_in + skip_if(["oracle"])
+
     @property
     def autocommit(self):
         """target dialect supports 'AUTOCOMMIT' as an isolation_level"""
-        return only_on(
-            ("postgresql", "mysql", "mssql+pyodbc", "mssql+pymssql"),
-            "dialect does not support AUTOCOMMIT isolation mode",
+
+        return self.isolation_level + only_if(
+            lambda config: "AUTOCOMMIT"
+            in self.get_isolation_levels(config)["supported"]
         )
 
     @property
@@ -338,11 +379,6 @@ class DefaultRequirements(SuiteRequirements):
                 # no access to same table
                 no_support("mysql", "requires SUPER priv"),
                 exclude("mysql", "<", (5, 0, 10), "not supported by database"),
-                # huh?  TODO: implement triggers for PG tests, remove this
-                no_support(
-                    "postgresql",
-                    "PG triggers need to be implemented for tests",
-                ),
             ]
         )
 
@@ -350,13 +386,18 @@ class DefaultRequirements(SuiteRequirements):
     def sequences_as_server_defaults(self):
         """Target database must support SEQUENCE as a server side default."""
 
-        return only_on(
-            "postgresql", "doesn't support sequences as a server side default."
+        return self.sequences + only_on(
+            ["postgresql", "mariadb", "oracle >= 18"],
+            "doesn't support sequences as a server side default.",
         )
 
     @property
     def sql_expressions_inserted_as_primary_key(self):
         return only_if([self.returning, self.sqlite])
+
+    @property
+    def computed_columns_on_update_returning(self):
+        return self.computed_columns + skip_if("oracle")
 
     @property
     def correlated_outer_joins(self):
@@ -431,16 +472,16 @@ class DefaultRequirements(SuiteRequirements):
 
     @property
     def cross_schema_fk_reflection(self):
-        """target system must support reflection of inter-schema foreign keys
-        """
+        """target system must support reflection of inter-schema foreign
+        keys"""
         return only_on(["postgresql", "mysql", "mssql"])
 
     @property
     def implicit_default_schema(self):
         """target system has a strong concept of 'default' schema that can
-           be referred to implicitly.
+        be referred to implicitly.
 
-           basically, PostgreSQL.
+        basically, PostgreSQL.
 
         """
         return only_on(["postgresql"])
@@ -476,12 +517,14 @@ class DefaultRequirements(SuiteRequirements):
     def temp_table_names(self):
         """target dialect supports listing of temporary table names"""
 
-        return only_on(["sqlite", "oracle"])
+        return only_on(["sqlite", "oracle"]) + skip_if(self._sqlite_file_db)
 
     @property
     def temporary_views(self):
         """target database supports temporary views"""
-        return only_on(["sqlite", "postgresql"])
+        return only_on(["sqlite", "postgresql"]) + skip_if(
+            self._sqlite_file_db
+        )
 
     @property
     def update_nowait(self):
@@ -500,18 +543,24 @@ class DefaultRequirements(SuiteRequirements):
     @property
     def ctes(self):
         """Target database supports CTEs"""
-
         return only_on(
             [
                 lambda config: against(config, "mysql")
                 and (
-                    config.db.dialect._is_mariadb
-                    and config.db.dialect._mariadb_normalized_version_info
-                    >= (10, 2)
+                    (
+                        config.db.dialect._is_mariadb
+                        and config.db.dialect._mariadb_normalized_version_info
+                        >= (10, 2)
+                    )
+                    or (
+                        not config.db.dialect._is_mariadb
+                        and config.db.dialect.server_version_info >= (8,)
+                    )
                 ),
                 "postgresql",
                 "mssql",
                 "oracle",
+                "sqlite>=3.8.3",
             ]
         )
 
@@ -609,7 +658,7 @@ class DefaultRequirements(SuiteRequirements):
     def sql_expression_limit_offset(self):
         return (
             fails_if(
-                ["mysql", "mssql"],
+                ["mysql"],
                 "Target backend can't accommodate full expressions in "
                 "OFFSET or LIMIT",
             )
@@ -626,6 +675,23 @@ class DefaultRequirements(SuiteRequirements):
     @property
     def two_phase_transactions(self):
         """Target database must support two-phase transactions."""
+
+        def pg_prepared_transaction(config):
+            if not against(config, "postgresql"):
+                return False
+
+            with config.db.connect() as conn:
+                try:
+                    num = conn.scalar(
+                        text(
+                            "select cast(setting AS integer) from pg_settings "
+                            "where name = 'max_prepared_transactions'"
+                        )
+                    )
+                except exc.OperationalError:
+                    return False
+                else:
+                    return num > 0
 
         return skip_if(
             [
@@ -652,6 +718,12 @@ class DefaultRequirements(SuiteRequirements):
                     "mysql",
                     "recent MySQL communiity editions have too many issues "
                     "(late 2016), disabling for now",
+                ),
+                NotPredicate(
+                    LambdaPredicate(
+                        pg_prepared_transaction,
+                        "max_prepared_transactions not available or zero",
+                    )
                 ),
             ]
         )
@@ -683,7 +755,9 @@ class DefaultRequirements(SuiteRequirements):
         """target database can persist/return an empty string with an
         unbounded text."""
 
-        return exclusions.open()
+        return fails_if(
+            ["oracle"], "oracle converts empty strings to a blank space"
+        )
 
     @property
     def expressions_against_unbounded_text(self):
@@ -733,8 +807,16 @@ class DefaultRequirements(SuiteRequirements):
         )
 
     @property
+    def symbol_names_w_double_quote(self):
+        """Target driver can create tables with a name like 'some " table'"""
+
+        return skip_if(
+            [no_support("oracle", "ORA-03001: unimplemented feature")]
+        )
+
+    @property
     def emulated_lastrowid(self):
-        """"target dialect retrieves cursor.lastrowid or an equivalent
+        """ "target dialect retrieves cursor.lastrowid or an equivalent
         after an insert() construct executes.
         """
         return fails_on_everything_except(
@@ -747,7 +829,7 @@ class DefaultRequirements(SuiteRequirements):
 
     @property
     def dbapi_lastrowid(self):
-        """"target backend includes a 'lastrowid' accessor on the DBAPI
+        """ "target backend includes a 'lastrowid' accessor on the DBAPI
         cursor object.
 
         """
@@ -760,7 +842,9 @@ class DefaultRequirements(SuiteRequirements):
     @property
     def nullsordering(self):
         """Target backends that support nulls ordering."""
-        return fails_on_everything_except("postgresql", "oracle", "firebird")
+        return fails_on_everything_except(
+            "postgresql", "oracle", "firebird", "sqlite >= 3.30.0"
+        )
 
     @property
     def reflects_pk_names(self):
@@ -775,7 +859,7 @@ class DefaultRequirements(SuiteRequirements):
         """target database can select an aggregate from a subquery that's
         also using an aggregate"""
 
-        return skip_if(["mssql"])
+        return skip_if(["mssql", "sqlite"])
 
     @property
     def array_type(self):
@@ -803,9 +887,46 @@ class DefaultRequirements(SuiteRequirements):
                     )
                 ),
                 "postgresql >= 9.3",
-                "sqlite >= 3.9",
+                self._sqlite_json,
             ]
         )
+
+    @property
+    def json_index_supplementary_unicode_element(self):
+        # for sqlite see https://bugs.python.org/issue38749
+        return skip_if(
+            [
+                lambda config: against(config, "mysql")
+                and config.db.dialect._is_mariadb,
+                "sqlite",
+            ]
+        )
+
+    def _sqlite_file_db(self, config):
+        return against(config, "sqlite") and config.db.dialect._is_url_file_db(
+            config.db.url
+        )
+
+    def _sqlite_memory_db(self, config):
+        return against(
+            config, "sqlite"
+        ) and not config.db.dialect._is_url_file_db(config.db.url)
+
+    def _sqlite_json(self, config):
+        if not against(config, "sqlite >= 3.9"):
+            return False
+        else:
+            with config.db.connect() as conn:
+                try:
+                    return (
+                        conn.scalar(
+                            """select json_extract('{"foo": "bar"}', """
+                            """'$."foo"')"""
+                        )
+                        == "bar"
+                    )
+                except exc.DBAPIError:
+                    return False
 
     @property
     def reflects_json_type(self):
@@ -1253,8 +1374,8 @@ class DefaultRequirements(SuiteRequirements):
                 drivername = conn.connection.connection.getinfo(
                     config.db.dialect.dbapi.SQL_DRIVER_NAME
                 )
-                # on linux this is 'libmsodbcsql-13.1.so.9.2'.
-                # don't know what it is on windows
+                # on linux this is something like 'libmsodbcsql-13.1.so.9.2'.
+                # on Windows this is something like 'msodbcsql17.dll'.
                 return "msodbc" in drivername
 
         return only_if(
@@ -1266,6 +1387,19 @@ class DefaultRequirements(SuiteRequirements):
         return exclusions.skip_if(
             lambda: sys.version_info < (2, 7, 8),
             "Python issue 8743 fixed in Python 2.7.8",
+        )
+
+    @property
+    def granular_timezone(self):
+        """the datetime.timezone class, or SQLAlchemy's port, supports
+        seconds and microseconds.
+
+        SQLAlchemy ported the Python 3.7 version for Python 2, so
+        it passes on that.  For Python 3.6 and earlier, it is not supported.
+
+        """
+        return exclusions.skip_if(
+            lambda: sys.version_info >= (3,) and sys.version_info < (3, 7)
         )
 
     @property
@@ -1323,11 +1457,25 @@ class DefaultRequirements(SuiteRequirements):
 
         return only_if(check)
 
-    def _mariadb_102(self, config):
+    def _mysql_80(self, config):
         return (
             against(config, "mysql")
+            and config.db.dialect._is_mysql
+            and config.db.dialect.server_version_info >= (8,)
+        )
+
+    def _mariadb_102(self, config):
+        return (
+            against(config, ["mysql", "mariadb"])
             and config.db.dialect._is_mariadb
-            and config.db.dialect._mariadb_normalized_version_info > (10, 2)
+            and config.db.dialect._mariadb_normalized_version_info >= (10, 2)
+        )
+
+    def _mariadb_105(self, config):
+        return (
+            against(config, ["mysql", "mariadb"])
+            and config.db.dialect._is_mariadb
+            and config.db.dialect._mariadb_normalized_version_info >= (10, 5)
         )
 
     def _mysql_and_check_constraints_exist(self, config):
@@ -1369,6 +1517,12 @@ class DefaultRequirements(SuiteRequirements):
             or config.db.dialect._mariadb_normalized_version_info < (10, 3)
         )
 
+    def _mysql_not_mariadb_104(self, config):
+        return against(config, "mysql") and (
+            not config.db.dialect._is_mariadb
+            or config.db.dialect._mariadb_normalized_version_info < (10, 4)
+        )
+
     def _has_mysql_on_windows(self, config):
         return (
             against(config, "mysql")
@@ -1401,3 +1555,31 @@ class DefaultRequirements(SuiteRequirements):
             lambda config: against(config, "oracle+cx_oracle")
             and config.db.dialect.cx_oracle_ver < (6,)
         )
+
+    @property
+    def computed_columns(self):
+        return skip_if(["postgresql < 12", "sqlite < 3.31", "mysql < 5.7"])
+
+    @property
+    def python_profiling_backend(self):
+        return only_on([self._sqlite_memory_db])
+
+    @property
+    def computed_columns_stored(self):
+        return self.computed_columns + skip_if(["oracle", "firebird"])
+
+    @property
+    def computed_columns_virtual(self):
+        return self.computed_columns + skip_if(["postgresql", "firebird"])
+
+    @property
+    def computed_columns_default_persisted(self):
+        return self.computed_columns + only_if("postgresql")
+
+    @property
+    def computed_columns_reflect_persisted(self):
+        return self.computed_columns + skip_if("oracle")
+
+    @property
+    def supports_for_update_of(self):
+        return only_if(lambda config: config.db.dialect.supports_for_update_of)

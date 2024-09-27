@@ -1,5 +1,5 @@
 # sql/crud.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -22,10 +22,10 @@ REQUIRED = util.symbol(
     """
 Placeholder for the value within a :class:`.BindParameter`
 which is required to be present when the statement is passed
-to :meth:`.Connection.execute`.
+to :meth:`_engine.Connection.execute`.
 
-This symbol is typically used when a :func:`.expression.insert`
-or :func:`.expression.update` statement is compiled without parameter
+This symbol is typically used when a :func:`_expression.insert`
+or :func:`_expression.update` statement is compiled without parameter
 values present.
 
 """,
@@ -42,8 +42,10 @@ def _setup_crud_params(compiler, stmt, local_stmt_type, **kw):
     restore_isdelete = compiler.isdelete
 
     should_restore = (
-        restore_isinsert or restore_isupdate or restore_isdelete
-    ) or len(compiler.stack) > 1
+        (restore_isinsert or restore_isupdate or restore_isdelete)
+        or len(compiler.stack) > 1
+        or "visiting_cte" in kw
+    )
 
     if local_stmt_type is ISINSERT:
         compiler.isupdate = False
@@ -729,6 +731,12 @@ def _get_stmt_parameters_params(
                     elements.BindParameter(None, v, type_=k.type), **kw
                 )
             else:
+                if v._is_bind_parameter and v.type._isnull:
+                    # either unique parameter, or other bound parameters that
+                    # were passed in directly
+                    # set type to that of the column unconditionally
+                    v = v._with_binary_element_type(k.type)
+
                 v = compiler.process(v.self_group(), **kw)
 
             values.append((k, v))

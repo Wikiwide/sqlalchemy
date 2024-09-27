@@ -35,7 +35,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -221,7 +221,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
     def test_orderby_related(self):
         """A regular mapper select on a single table can
-            order by a relationship to a second table"""
+        order by a relationship to a second table"""
 
         Address, addresses, users, User = (
             self.classes.Address,
@@ -714,7 +714,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
     def test_double_w_ac(self):
         """Eager loading with two relationships simultaneously,
-            from the same table, using aliases."""
+        from the same table, using aliases."""
 
         (
             users,
@@ -788,7 +788,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
     def test_double_w_ac_against_subquery(self):
         """Eager loading with two relationships simultaneously,
-            from the same table, using aliases."""
+        from the same table, using aliases."""
 
         (
             users,
@@ -1108,6 +1108,46 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             eq_(self.static.user_address_result, result)
 
         self.assert_sql_count(testing.db, go, 1)
+
+    def test_group_by_only(self):
+        # like distinct(), a group_by() has a similar effect so the
+        # joined eager load needs to subquery for this as well
+        users, Address, addresses, User = (
+            self.tables.users,
+            self.classes.Address,
+            self.tables.addresses,
+            self.classes.User,
+        )
+
+        mapper(
+            User,
+            users,
+            properties={
+                "addresses": relationship(
+                    mapper(Address, addresses),
+                    lazy="joined",
+                    order_by=addresses.c.email_address,
+                )
+            },
+        )
+
+        q = create_session().query(User)
+        eq_(
+            [
+                User(id=7, addresses=[Address(id=1)]),
+                User(
+                    id=8,
+                    addresses=[
+                        Address(id=3, email_address="ed@bettyboop.com"),
+                        Address(id=4, email_address="ed@lala.com"),
+                        Address(id=2, email_address="ed@wood.com"),
+                    ],
+                ),
+                User(id=9, addresses=[Address(id=5)]),
+                User(id=10, addresses=[]),
+            ],
+            q.order_by(User.id).group_by(User).all(),  # group by all columns
+        )
 
     def test_limit_2(self):
         keywords, items, item_keywords, Keyword, Item = (
@@ -1656,7 +1696,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
         def go():
             a = q.filter(addresses.c.id == 1).one()
-            is_not_(a.user, None)
+            is_not(a.user, None)
             u1 = sess.query(User).get(7)
             is_(a.user, u1)
 
@@ -2955,8 +2995,8 @@ class InnerJoinSplicingTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         ]
 
     @classmethod
-    def insert_data(cls):
-        s = Session(testing.db)
+    def insert_data(cls, connection):
+        s = Session(connection)
         s.add_all(cls._fixture_data())
         s.commit()
 
@@ -3183,8 +3223,8 @@ class InnerJoinSplicingWSecondaryTest(
         ]
 
     @classmethod
-    def insert_data(cls):
-        s = Session(testing.db)
+    def insert_data(cls, connection):
+        s = Session(connection)
         s.add_all(cls._fixture_data())
         s.commit()
 
@@ -4160,25 +4200,34 @@ class MixedSelfReferentialEagerTest(fixtures.MappedTest):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         b_table, a_table = cls.tables.b_table, cls.tables.a_table
 
-        a_table.insert().execute(dict(id=1), dict(id=2), dict(id=3))
-        b_table.insert().execute(
-            dict(id=1, parent_a_id=2, parent_b1_id=None, parent_b2_id=None),
-            dict(id=2, parent_a_id=1, parent_b1_id=1, parent_b2_id=None),
-            dict(id=3, parent_a_id=1, parent_b1_id=1, parent_b2_id=2),
-            dict(id=4, parent_a_id=3, parent_b1_id=1, parent_b2_id=None),
-            dict(id=5, parent_a_id=3, parent_b1_id=None, parent_b2_id=2),
-            dict(id=6, parent_a_id=1, parent_b1_id=1, parent_b2_id=3),
-            dict(id=7, parent_a_id=2, parent_b1_id=None, parent_b2_id=3),
-            dict(id=8, parent_a_id=2, parent_b1_id=1, parent_b2_id=2),
-            dict(id=9, parent_a_id=None, parent_b1_id=1, parent_b2_id=None),
-            dict(id=10, parent_a_id=3, parent_b1_id=7, parent_b2_id=2),
-            dict(id=11, parent_a_id=3, parent_b1_id=1, parent_b2_id=8),
-            dict(id=12, parent_a_id=2, parent_b1_id=5, parent_b2_id=2),
-            dict(id=13, parent_a_id=3, parent_b1_id=4, parent_b2_id=4),
-            dict(id=14, parent_a_id=3, parent_b1_id=7, parent_b2_id=2),
+        connection.execute(
+            a_table.insert(), [dict(id=1), dict(id=2), dict(id=3)]
+        )
+        connection.execute(
+            b_table.insert(),
+            [
+                dict(
+                    id=1, parent_a_id=2, parent_b1_id=None, parent_b2_id=None
+                ),
+                dict(id=2, parent_a_id=1, parent_b1_id=1, parent_b2_id=None),
+                dict(id=3, parent_a_id=1, parent_b1_id=1, parent_b2_id=2),
+                dict(id=4, parent_a_id=3, parent_b1_id=1, parent_b2_id=None),
+                dict(id=5, parent_a_id=3, parent_b1_id=None, parent_b2_id=2),
+                dict(id=6, parent_a_id=1, parent_b1_id=1, parent_b2_id=3),
+                dict(id=7, parent_a_id=2, parent_b1_id=None, parent_b2_id=3),
+                dict(id=8, parent_a_id=2, parent_b1_id=1, parent_b2_id=2),
+                dict(
+                    id=9, parent_a_id=None, parent_b1_id=1, parent_b2_id=None
+                ),
+                dict(id=10, parent_a_id=3, parent_b1_id=7, parent_b2_id=2),
+                dict(id=11, parent_a_id=3, parent_b1_id=1, parent_b2_id=8),
+                dict(id=12, parent_a_id=2, parent_b1_id=5, parent_b2_id=2),
+                dict(id=13, parent_a_id=3, parent_b1_id=4, parent_b2_id=4),
+                dict(id=14, parent_a_id=3, parent_b1_id=7, parent_b2_id=2),
+            ],
         )
 
     def test_eager_load(self):
@@ -4778,16 +4827,18 @@ class CorrelatedSubqueryTest(fixtures.MappedTest):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         stuff, users = cls.tables.stuff, cls.tables.users
 
-        users.insert().execute(
+        connection.execute(
+            users.insert(),
             {"id": 1, "name": "user1"},
             {"id": 2, "name": "user2"},
             {"id": 3, "name": "user3"},
         )
 
-        stuff.insert().execute(
+        connection.execute(
+            stuff.insert(),
             {"id": 1, "user_id": 1, "date": datetime.date(2007, 10, 15)},
             {"id": 2, "user_id": 1, "date": datetime.date(2007, 12, 15)},
             {"id": 3, "user_id": 1, "date": datetime.date(2007, 11, 15)},
@@ -5343,6 +5394,35 @@ class EntityViaMultiplePathTestOne(fixtures.DeclarativeMappedTest):
         # PYTHONHASHSEED
         in_("d", a1.c.__dict__)
 
+    def test_multi_path_load_of_type(self):
+        A, B, C, D = self.classes("A", "B", "C", "D")
+
+        s = Session()
+
+        c = C(d=D())
+
+        s.add(A(b=B(c=c), c=c))
+        s.commit()
+
+        c_alias_1 = aliased(C)
+        c_alias_2 = aliased(C)
+
+        q = s.query(A)
+        q = q.join(A.b).join(B.c.of_type(c_alias_1)).join(c_alias_1.d)
+        q = q.options(
+            contains_eager(A.b)
+            .contains_eager(B.c.of_type(c_alias_1))
+            .contains_eager(c_alias_1.d)
+        )
+        q = q.join(A.c.of_type(c_alias_2))
+        q = q.options(contains_eager(A.c.of_type(c_alias_2)))
+
+        a1 = q.all()[0]
+
+        # ensure 'd' key was populated in dict.  Varies based on
+        # PYTHONHASHSEED
+        in_("d", a1.c.__dict__)
+
 
 class EntityViaMultiplePathTestTwo(fixtures.DeclarativeMappedTest):
     """test for [ticket:3431]"""
@@ -5401,6 +5481,7 @@ class EntityViaMultiplePathTestTwo(fixtures.DeclarativeMappedTest):
         l_ac = aliased(LD)
         u_ac = aliased(User)
 
+        # these paths don't work out correctly?
         lz_test = (
             s.query(LDA)
             .join("ld")
@@ -5410,6 +5491,39 @@ class EntityViaMultiplePathTestTwo(fixtures.DeclarativeMappedTest):
                 contains_eager("a")
                 .contains_eager("ld", alias=l_ac)
                 .contains_eager("user", alias=u_ac)
+            )
+            .first()
+        )
+
+        in_("user", lz_test.a.ld.__dict__)
+
+    def test_multi_path_load_of_type(self):
+        User, LD, A, LDA = self.classes("User", "LD", "A", "LDA")
+
+        s = Session()
+
+        u0 = User(data=42)
+        l0 = LD(user=u0)
+        z0 = A(ld=l0)
+        lz0 = LDA(ld=l0, a=z0)
+        s.add_all([u0, l0, z0, lz0])
+        s.commit()
+
+        l_ac = aliased(LD)
+        u_ac = aliased(User)
+
+        lz_test = (
+            s.query(LDA)
+            .join(LDA.ld)
+            .options(contains_eager(LDA.ld))
+            .join(LDA.a)
+            .join(LDA.ld.of_type(l_ac))
+            .join(l_ac.user.of_type(u_ac))
+            .options(
+                contains_eager(LDA.a),
+                contains_eager(LDA.ld.of_type(l_ac)).contains_eager(
+                    l_ac.user.of_type(u_ac)
+                ),
             )
             .first()
         )
@@ -5441,9 +5555,9 @@ class LazyLoadOptSpecificityTest(fixtures.DeclarativeMappedTest):
             b_id = Column(ForeignKey("b.id"))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C = cls.classes("A", "B", "C")
-        s = Session()
+        s = Session(connection)
         s.add(A(id=1, bs=[B(cs=[C()])]))
         s.add(A(id=2))
         s.commit()

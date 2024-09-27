@@ -31,10 +31,7 @@ Zoo = Animal = session = None
 
 class ZooMarkTest(replay_fixture.ReplayFixtureTest):
 
-    """Runs the ZooMark and squawks if method counts vary from the norm.
-
-
-    """
+    """Runs the ZooMark and squawks if method counts vary from the norm."""
 
     __requires__ = ("cpython",)
     __only_on__ = "postgresql+psycopg2"
@@ -141,6 +138,10 @@ class ZooMarkTest(replay_fixture.ReplayFixtureTest):
             Admission=134.95,
         )
         self.session.add(lp)
+
+        # ensure we flush the tables in a specific order as the replayable
+        # session assumes this
+        self.session.flush()
 
         # Animals
 

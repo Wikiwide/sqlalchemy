@@ -1,6 +1,7 @@
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
+from sqlalchemy import util
 from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import polymorphic_union
@@ -150,7 +151,17 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     @classmethod
-    def insert_data(cls):
+    def setup_classes(cls):
+        cls.classes["Engineer"] = Engineer
+        cls.classes["Person"] = Person
+        cls.classes["Manager"] = Manager
+        cls.classes["Machine"] = Machine
+        cls.classes["Boss"] = Boss
+        cls.classes["Company"] = Company
+        cls.classes["Paperwork"] = Paperwork
+
+    @classmethod
+    def insert_data(cls, connection):
 
         cls.e1 = e1 = Engineer(
             name="dilbert",
@@ -208,7 +219,7 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
         cls.c2 = c2 = Company(name="Elbonia, Inc.")
         c2.employees = [e3]
 
-        sess = create_session()
+        sess = create_session(connection)
         sess.add(c1)
         sess.add(c2)
         sess.flush()
@@ -315,9 +326,10 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
 
         mapper(Machine, machines)
 
-        person_with_polymorphic, manager_with_polymorphic = (
-            cls._get_polymorphics()
-        )
+        (
+            person_with_polymorphic,
+            manager_with_polymorphic,
+        ) = cls._get_polymorphics()
 
         mapper(
             Person,
@@ -384,11 +396,14 @@ class _PolymorphicUnions(_PolymorphicFixtureBase):
             cls.tables.managers,
             cls.tables.boss,
         )
+
         person_join = polymorphic_union(
-            {
-                "engineer": people.join(engineers),
-                "manager": people.join(managers),
-            },
+            util.OrderedDict(
+                [
+                    ("engineer", people.join(engineers)),
+                    ("manager", people.join(managers)),
+                ]
+            ),
             None,
             "pjoin",
         )

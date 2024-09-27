@@ -59,6 +59,13 @@ class QueryTest(_fixtures.FixtureTest):
             },
         )
 
+        class OrderWProp(cls.classes.Order):
+            @property
+            def some_attr(self):
+                return "hi"
+
+        mapper(OrderWProp, None, inherits=cls.classes.Order)
+
 
 class PathTest(object):
     def _make_path(self, path):
@@ -191,6 +198,21 @@ class LoadTest(PathTest, QueryTest):
             "relationship",
         )
 
+    def test_gen_path_attr_str_not_mapped(self):
+        OrderWProp = self.classes.OrderWProp
+
+        sess = Session()
+        q = sess.query(OrderWProp)
+
+        assert_raises_message(
+            sa.exc.ArgumentError,
+            r"Expected attribute \"some_attr\" on mapped class "
+            "OrderWProp->orders to be a mapped attribute; instead "
+            "got .*property.* object.",
+            q.options,
+            defer("some_attr"),
+        )
+
     def test_gen_path_attr_entity_invalid_noraiseerr(self):
         User = self.classes.User
         Order = self.classes.Order
@@ -213,7 +235,11 @@ class LoadTest(PathTest, QueryTest):
 
         l1 = Load(User)
         l2 = l1.joinedload("addresses")
-        eq_(l1.context, {("loader", self._make_path([User, "addresses"])): l2})
+        to_bind = l2.context.values()[0]
+        eq_(
+            l1.context,
+            {("loader", self._make_path([User, "addresses"])): to_bind},
+        )
 
     def test_set_strat_col(self):
         User = self.classes.User
@@ -1135,12 +1161,21 @@ class OptionsNoPropTest(_fixtures.FixtureTest):
             'column property "Keyword.keywords"',
         )
 
-    def test_wrong_type_in_option(self):
+    def test_wrong_type_in_option_cls(self):
         Item = self.classes.Item
         Keyword = self.classes.Keyword
         self._assert_eager_with_entity_exception(
             [Item],
             (joinedload(Keyword),),
+            r"mapper option expects string key or list of attributes",
+        )
+
+    def test_wrong_type_in_option_descriptor(self):
+        OrderWProp = self.classes.OrderWProp
+
+        self._assert_eager_with_entity_exception(
+            [OrderWProp],
+            (joinedload(OrderWProp.some_attr),),
             r"mapper option expects string key or list of attributes",
         )
 
@@ -1208,6 +1243,13 @@ class OptionsNoPropTest(_fixtures.FixtureTest):
                 keywords=relationship(Keyword, secondary=item_keywords)
             ),
         )
+
+        class OrderWProp(cls.classes.Order):
+            @property
+            def some_attr(self):
+                return "hi"
+
+        mapper(OrderWProp, None, inherits=cls.classes.Order)
 
     def _assert_option(self, entity_list, option):
         Item = self.classes.Item
@@ -1351,6 +1393,7 @@ class PickleTest(PathTest, QueryTest):
         User = self.classes.User
 
         opt = self._option_fixture(User.addresses)
+        to_bind = list(opt._to_bind)
         eq_(
             opt.__getstate__(),
             {
@@ -1359,13 +1402,27 @@ class PickleTest(PathTest, QueryTest):
                 "is_class_strategy": False,
                 "path": [(User, "addresses", None)],
                 "propagate_to_loaders": True,
-                "_to_bind": [opt],
-                "strategy": (("lazy", "joined"),),
+                "_of_type": None,
+                "_to_bind": to_bind,
             },
         )
 
     def test_modern_opt_setstate(self):
         User = self.classes.User
+
+        inner_opt = strategy_options._UnboundLoad.__new__(
+            strategy_options._UnboundLoad
+        )
+        inner_state = {
+            "_is_chain_link": False,
+            "local_opts": {},
+            "is_class_strategy": False,
+            "path": [(User, "addresses", None)],
+            "propagate_to_loaders": True,
+            "_to_bind": None,
+            "strategy": (("lazy", "joined"),),
+        }
+        inner_opt.__setstate__(inner_state)
 
         opt = strategy_options._UnboundLoad.__new__(
             strategy_options._UnboundLoad
@@ -1376,8 +1433,7 @@ class PickleTest(PathTest, QueryTest):
             "is_class_strategy": False,
             "path": [(User, "addresses", None)],
             "propagate_to_loaders": True,
-            "_to_bind": [opt],
-            "strategy": (("lazy", "joined"),),
+            "_to_bind": [inner_opt],
         }
 
         opt.__setstate__(state)

@@ -27,7 +27,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.util import gc_collect
@@ -405,6 +405,58 @@ class SessionTransactionTest(fixtures.RemovesEvents, FixtureTest):
 
         eq_(len(sess.query(User).all()), 1)
 
+    def test_begin_fails_connection_is_closed(self):
+        eng = engines.testing_engine()
+
+        state = []
+
+        @event.listens_for(eng, "begin")
+        def do_begin(conn):
+            state.append((conn, conn.connection))
+            raise Exception("failure")
+
+        s1 = Session(eng)
+
+        assert_raises_message(Exception, "failure", s1.execute, "select 1")
+
+        conn, fairy = state[0]
+        assert not fairy.is_valid
+        assert conn.closed
+        assert not conn.invalidated
+
+        s1.close()
+
+        # close does not occur because references were not saved, however
+        # the underlying DBAPI connection was closed
+        assert not fairy.is_valid
+        assert conn.closed
+        assert not conn.invalidated
+
+    def test_begin_savepoint_fails_connection_is_not_closed(self):
+        eng = engines.testing_engine()
+
+        state = []
+
+        @event.listens_for(eng, "savepoint")
+        def do_begin(conn, name):
+            state.append((conn, conn.connection))
+            raise Exception("failure")
+
+        s1 = Session(eng)
+
+        s1.begin_nested()
+        assert_raises_message(Exception, "failure", s1.execute, "select 1")
+
+        conn, fairy = state[0]
+        assert fairy.is_valid
+        assert not conn.closed
+        assert not conn.invalidated
+
+        s1.close()
+
+        assert conn.closed
+        assert not fairy.is_valid
+
     def test_continue_flushing_on_commit(self):
         """test that post-flush actions get flushed also if
         we're in commit()"""
@@ -423,7 +475,7 @@ class SessionTransactionTest(fixtures.RemovesEvents, FixtureTest):
         x = [1]
 
         @event.listens_for(sess, "after_commit")  # noqa
-        def add_another_user(session):
+        def add_another_user(session):  # noqa
             x[0] += 1
 
         sess.add(to_flush.pop())
@@ -510,6 +562,7 @@ class SessionTransactionTest(fixtures.RemovesEvents, FixtureTest):
             sess.rollback,
         )
 
+    @testing.requires.independent_connections
     @testing.emits_warning(".*previous exception")
     def test_failed_rollback_deactivates_transaction(self):
         # test #4050
@@ -567,11 +620,12 @@ class SessionTransactionTest(fixtures.RemovesEvents, FixtureTest):
         eq_(trans._state, _session.CLOSED)
 
         # outermost transaction is new
-        is_not_(session.transaction, trans)
+        is_not(session.transaction, trans)
 
         # outermost is active
         eq_(session.transaction._state, _session.ACTIVE)
 
+    @testing.requires.independent_connections
     @testing.emits_warning(".*previous exception")
     def test_failed_rollback_deactivates_transaction_ctx_integration(self):
         # test #4050 in the same context as that of oslo.db
@@ -839,9 +893,8 @@ class SessionTransactionTest(fixtures.RemovesEvents, FixtureTest):
         session = create_session(autocommit=False)
         session.add(User(name="ed"))
         session.transaction.commit()
-        assert (
-            session.transaction is not None
-        ), "autocommit=False should start a new transaction"
+
+        is_not(session.transaction, None)
 
     @testing.requires.python2
     @testing.requires.savepoints_w_release
@@ -1526,7 +1579,7 @@ class SavepointTest(_LocalFixture):
         assert u1 not in s.new
 
         is_(trans._state, _session.CLOSED)
-        is_not_(s.transaction, trans)
+        is_not(s.transaction, trans)
         is_(s.transaction._state, _session.ACTIVE)
 
         is_(s.transaction.nested, False)

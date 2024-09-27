@@ -1162,10 +1162,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
 
 
 class SelfReferentialPostUpdateTest(fixtures.MappedTest):
-    """Post_update on a single self-referential mapper.
-
-
-    """
+    """Post_update on a single self-referential mapper."""
 
     @classmethod
     def define_tables(cls, metadata):
@@ -1502,8 +1499,8 @@ class SelfReferentialPostUpdateTest3(fixtures.MappedTest):
 
 
 class PostUpdateBatchingTest(fixtures.MappedTest):
-    """test that lots of post update cols batch together into a single UPDATE.
-    """
+    """test that lots of post update cols batch together into a single
+    UPDATE."""
 
     @classmethod
     def define_tables(cls, metadata):
@@ -1760,7 +1757,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
     def test_update_defaults_refresh_flush_event_no_postupdate(self):
         # run the same test as test_update_defaults_refresh_flush_event
         # but don't actually use any postupdate functionality
-        A, = self.classes("A")
+        (A,) = self.classes("A")
 
         canary = mock.Mock()
         event.listen(A, "refresh_flush", canary.refresh_flush)
@@ -1845,7 +1842,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
         # run the same test as
         # test_update_defaults_dont_expire_on_delete_no_postupdate
         # but don't actually use any postupdate functionality
-        A, = self.classes("A")
+        (A,) = self.classes("A")
 
         canary = mock.Mock()
         event.listen(A, "refresh_flush", canary.refresh_flush)

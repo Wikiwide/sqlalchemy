@@ -1,5 +1,6 @@
 # -*- encoding: utf-8
 from sqlalchemy import Column
+from sqlalchemy import Computed
 from sqlalchemy import delete
 from sqlalchemy import extract
 from sqlalchemy import func
@@ -7,6 +8,7 @@ from sqlalchemy import Index
 from sqlalchemy import insert
 from sqlalchemy import Integer
 from sqlalchemy import literal
+from sqlalchemy import literal_column
 from sqlalchemy import MetaData
 from sqlalchemy import PrimaryKeyConstraint
 from sqlalchemy import schema
@@ -16,11 +18,12 @@ from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
+from sqlalchemy import text
 from sqlalchemy import union
 from sqlalchemy import UniqueConstraint
 from sqlalchemy import update
 from sqlalchemy.dialects import mssql
-from sqlalchemy.dialects.mssql import base
+from sqlalchemy.dialects.mssql import base as mssql_base
 from sqlalchemy.dialects.mssql import mxodbc
 from sqlalchemy.dialects.mssql.base import try_cast
 from sqlalchemy.sql import column
@@ -39,10 +42,23 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(sql.false(), "0")
         self.assert_compile(sql.true(), "1")
 
-    def test_select(self):
-        t = table("sometable", column("somecolumn"))
+    @testing.combinations(
+        ("plain", "sometable", "sometable"),
+        ("matched_square_brackets", "colo[u]r", "[colo[u]]r]"),
+        ("unmatched_left_square_bracket", "colo[ur", "[colo[ur]"),
+        ("unmatched_right_square_bracket", "colou]r", "[colou]]r]"),
+        ("double quotes", 'Edwin "Buzz" Aldrin', '[Edwin "Buzz" Aldrin]'),
+        ("dash", "Dash-8", "[Dash-8]"),
+        ("slash", "tl/dr", "[tl/dr]"),
+        ("space", "Red Deer", "[Red Deer]"),
+        ("question mark", "OK?", "[OK?]"),
+        ("percent", "GST%", "[GST%]"),
+        id_="iaa",
+    )
+    def test_identifier_rendering(self, table_name, rendered_name):
+        t = table(table_name, column("somecolumn"))
         self.assert_compile(
-            t.select(), "SELECT sometable.somecolumn FROM sometable"
+            t.select(), "SELECT {0}.somecolumn FROM {0}".format(rendered_name)
         )
 
     def test_select_with_nolock(self):
@@ -408,6 +424,42 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             checkpositional=("bar",),
         )
 
+    def test_schema_many_tokens_one(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            schema="abc.def.efg.hij",
+        )
+
+        # for now, we don't really know what the above means, at least
+        # don't lose the dot
+        self.assert_compile(
+            select([tbl]),
+            "SELECT [abc.def.efg].hij.test.id FROM [abc.def.efg].hij.test",
+        )
+
+        dbname, owner = mssql_base._schema_elements("abc.def.efg.hij")
+        eq_(dbname, "abc.def.efg")
+        assert not isinstance(dbname, quoted_name)
+        eq_(owner, "hij")
+
+    def test_schema_many_tokens_two(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            schema="[abc].[def].[efg].[hij]",
+        )
+
+        self.assert_compile(
+            select([tbl]),
+            "SELECT [abc].[def].[efg].hij.test.id "
+            "FROM [abc].[def].[efg].hij.test",
+        )
+
     def test_force_schema_quoted_name_w_dot_case_insensitive(self):
         metadata = MetaData()
         tbl = Table(
@@ -479,21 +531,6 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             select([tbl]), "SELECT [Foo].dbo.test.id FROM [Foo].dbo.test"
         )
-
-    def test_owner_database_pairs(self):
-        dialect = mssql.dialect()
-
-        for identifier, expected_schema, expected_owner in [
-            ("foo", None, "foo"),
-            ("foo.bar", "foo", "bar"),
-            ("Foo.Bar", "Foo", "Bar"),
-            ("[Foo.Bar]", None, "Foo.Bar"),
-            ("[Foo.Bar].[bat]", "Foo.Bar", "bat"),
-        ]:
-            schema, owner = base._owner_plus_db(dialect, identifier)
-
-            eq_(owner, expected_owner)
-            eq_(schema, expected_schema)
 
     def test_delete_schema(self):
         metadata = MetaData()
@@ -796,6 +833,28 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             c = s.compile(dialect=mssql.dialect())
             eq_(len(c._result_columns), 2)
             assert t.c.x in set(c._create_result_map()["x"][1])
+
+    def test_simple_limit_expression_offset_using_window(self):
+        t = table("t", column("x", Integer), column("y", Integer))
+
+        s = (
+            select([t])
+            .where(t.c.x == 5)
+            .order_by(t.c.y)
+            .limit(10)
+            .offset(literal_column("20"))
+        )
+
+        self.assert_compile(
+            s,
+            "SELECT anon_1.x, anon_1.y "
+            "FROM (SELECT t.x AS x, t.y AS y, "
+            "ROW_NUMBER() OVER (ORDER BY t.y) AS mssql_rn "
+            "FROM t "
+            "WHERE t.x = :x_1) AS anon_1 "
+            "WHERE mssql_rn > 20 AND mssql_rn <= :param_1 + 20",
+            checkparams={"param_1": 10, "x_1": 5},
+        )
 
     def test_limit_offset_using_window(self):
         t = table("t", column("x", Integer), column("y", Integer))
@@ -1136,7 +1195,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         idx = Index("test_idx_data_1", tbl.c.data, mssql_where=tbl.c.data > 1)
         self.assert_compile(
             schema.CreateIndex(idx),
-            "CREATE INDEX test_idx_data_1 ON test (data) WHERE data > 1"
+            "CREATE INDEX test_idx_data_1 ON test (data) WHERE data > 1",
         )
 
     def test_index_ordering(self):
@@ -1197,6 +1256,31 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema.CreateIndex(idx), "CREATE INDEX foo ON test (x) INCLUDE (y)"
         )
 
+    def test_index_include_where(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("x", Integer),
+            Column("y", Integer),
+            Column("z", Integer),
+        )
+        idx = Index(
+            "foo", tbl.c.x, mssql_include=[tbl.c.y], mssql_where=tbl.c.y > 1
+        )
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX foo ON test (x) INCLUDE (y) WHERE y > 1",
+        )
+
+        idx = Index(
+            "foo", tbl.c.x, mssql_include=[tbl.c.y], mssql_where=text("y > 1")
+        )
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX foo ON test (x) INCLUDE (y) WHERE y > 1",
+        )
+
     def test_try_cast(self):
         metadata = MetaData()
         t1 = Table("t1", metadata, Column("id", Integer, primary_key=True))
@@ -1204,6 +1288,27 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             select([try_cast(t1.c.id, Integer)]),
             "SELECT TRY_CAST (t1.id AS INTEGER) AS anon_1 FROM t1",
+        )
+
+    @testing.combinations(
+        ("no_persisted", "", "ignore"),
+        ("persisted_none", "", None),
+        ("persisted_true", " PERSISTED", True),
+        ("persisted_false", "", False),
+        id_="iaa",
+    )
+    def test_column_computed(self, text, persisted):
+        m = MetaData()
+        kwargs = {"persisted": persisted} if persisted != "ignore" else {}
+        t = Table(
+            "t",
+            m,
+            Column("x", Integer),
+            Column("y", Integer, Computed("x + 2", **kwargs)),
+        )
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (x INTEGER NULL, y AS (x + 2)%s)" % text,
         )
 
 

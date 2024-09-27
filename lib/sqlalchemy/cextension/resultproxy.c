@@ -1,6 +1,6 @@
 /*
 resultproxy.c
-Copyright (C) 2010-2019 the SQLAlchemy authors and contributors <see AUTHORS file>
+Copyright (C) 2010-2021 the SQLAlchemy authors and contributors <see AUTHORS file>
 Copyright (C) 2010-2011 Gaetan de Menten gdementen@gmail.com
 
 This module is part of SQLAlchemy and is released under
@@ -294,7 +294,7 @@ BaseRowProxy_subscript(BaseRowProxy *self, PyObject *key)
         record = PyDict_GetItem((PyObject *)self->keymap, key);
         if (record == NULL) {
             record = PyObject_CallMethod(self->parent, "_key_fallback",
-                                         "O", key);
+                                         "OO", key, Py_None);
             if (record == NULL)
                 return NULL;
             key_fallback = 1;

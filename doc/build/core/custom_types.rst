@@ -1,4 +1,4 @@
-.. module:: sqlalchemy.types
+.. currentmodule:: sqlalchemy.types
 
 .. _types_custom:
 
@@ -28,7 +28,7 @@ can be associated with any type::
     def compile_binary_sqlite(type_, compiler, **kw):
         return "BLOB"
 
-The above code allows the usage of :class:`.types.BINARY`, which
+The above code allows the usage of :class:`_types.BINARY`, which
 will produce the string ``BINARY`` against all backends except SQLite,
 in which case it will produce ``BLOB``.
 
@@ -127,6 +127,42 @@ many decimal places.   Here's a recipe that rounds them down::
                 value.as_tuple()[2] < self.quantize_int:
                 value = value.quantize(self.quantize)
             return value
+
+Store Timezone Aware Timestamps as Timezone Naive UTC
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Timestamps in databases should always be stored in a timezone-agnostic way. For
+most databases, this means ensuring a timestamp is first in the UTC timezone
+before it is stored, then storing it as timezone-naive (that is, without any
+timezone associated with it; UTC is assumed to be the "implicit" timezone).
+Alternatively,  database-specific types like PostgreSQLs "TIMESTAMP WITH
+TIMEZONE" are often preferred for their richer functionality; however, storing
+as plain UTC will work on all databases and drivers.   When a
+timezone-intelligent database type is not an option or is not preferred,  the
+:class:`.TypeDecorator` can be used to create a datatype that convert timezone
+aware timestamps into timezone naive and back again.   Below, Python's
+built-in ``datetime.timezone.utc`` timezone is used to normalize and
+denormalize::
+
+    import datetime
+
+    class TZDateTime(TypeDecorator):
+        impl = DateTime
+
+        def process_bind_param(self, value, dialect):
+            if value is not None:
+                if not value.tzinfo:
+                    raise TypeError("tzinfo is required")
+                value = value.astimezone(datetime.timezone.utc).replace(
+                    tzinfo=None
+                )
+            return value
+
+        def process_result_value(self, value, dialect):
+            if value is not None:
+                value = value.replace(tzinfo=datetime.timezone.utc)
+            return value
+
 
 .. _custom_guid_type:
 
@@ -313,7 +349,7 @@ data into particular formats.
 Any :class:`.TypeEngine`, :class:`.UserDefinedType` or :class:`.TypeDecorator` subclass
 can include implementations of
 :meth:`.TypeEngine.bind_expression` and/or :meth:`.TypeEngine.column_expression`, which
-when defined to return a non-``None`` value should return a :class:`.ColumnElement`
+when defined to return a non-``None`` value should return a :class:`_expression.ColumnElement`
 expression to be injected into the SQL statement, either surrounding
 bound parameters or a column expression.  For example, to build a ``Geometry``
 type which will apply the PostGIS function ``ST_GeomFromText`` to all outgoing
@@ -334,8 +370,8 @@ in conjunction with :data:`~.sqlalchemy.sql.expression.func`::
         def column_expression(self, col):
             return func.ST_AsText(col, type_=self)
 
-We can apply the ``Geometry`` type into :class:`.Table` metadata
-and use it in a :func:`.select` construct::
+We can apply the ``Geometry`` type into :class:`_schema.Table` metadata
+and use it in a :func:`_expression.select` construct::
 
     geometry = Table('geometry', metadata,
                   Column('geom_id', Integer, primary_key=True),
@@ -357,7 +393,7 @@ is run on the bound parameter so that the passed-in value is converted::
 The :meth:`.TypeEngine.column_expression` method interacts with the
 mechanics of the compiler such that the SQL expression does not interfere
 with the labeling of the wrapped expression.   Such as, if we rendered
-a :func:`.select` against a :func:`.label` of our expression, the string
+a :func:`_expression.select` against a :func:`.label` of our expression, the string
 label is moved to the outside of the wrapped expression::
 
     print(select([geometry.c.geom_data.label('my_data')]))
@@ -368,7 +404,7 @@ Output::
     FROM geometry
 
 Another example is we decorate
-:class:`.postgresql.BYTEA` to provide a ``PGPString``, which will make use of the
+:class:`_postgresql.BYTEA` to provide a ``PGPString``, which will make use of the
 PostgreSQL ``pgcrypto`` extension to encrypt/decrypt values
 transparently::
 
@@ -437,7 +473,7 @@ Redefining and Creating New Operators
 -------------------------------------
 
 SQLAlchemy Core defines a fixed set of expression operators available to all column expressions.
-Some of these operations have the effect of overloading Python's built in operators;
+Some of these operations have the effect of overloading Python's built-in operators;
 examples of such operators include
 :meth:`.ColumnOperators.__eq__` (``table.c.somecolumn == 'foo'``),
 :meth:`.ColumnOperators.__invert__` (``~table.c.flag``),
@@ -448,7 +484,7 @@ explicit methods on column expressions, such as
 
 The Core expression constructs in all cases consult the type of the expression in order to determine
 the behavior of existing operators, as well as to locate additional operators that aren't part of
-the built in set.   The :class:`.TypeEngine` base class defines a root "comparison" implementation
+the built-in set.   The :class:`.TypeEngine` base class defines a root "comparison" implementation
 :class:`.TypeEngine.Comparator`, and many specific types provide their own sub-implementations of this
 class.   User-defined :class:`.TypeEngine.Comparator` implementations can be built directly into a
 simple subclass of a particular type in order to override or define new operations.  Below,
@@ -492,7 +528,7 @@ set to ``True``::
 New methods added to a :class:`.TypeEngine.Comparator` are exposed on an
 owning SQL expression
 using a ``__getattr__`` scheme, which exposes methods added to
-:class:`.TypeEngine.Comparator` onto the owning :class:`.ColumnElement`.
+:class:`.TypeEngine.Comparator` onto the owning :class:`_expression.ColumnElement`.
 For example, to add a ``log()`` function
 to integers::
 
@@ -567,12 +603,12 @@ column, we might receive back the string ``"VARCHAR"``.  SQLAlchemy's
 PostgreSQL dialect has a hardcoded mapping which links the string name
 ``"VARCHAR"`` to the SQLAlchemy :class:`.VARCHAR` class, and that's how when we
 emit a statement like ``Table('my_table', m, autoload_with=engine)``, the
-:class:`.Column` object within it would have an instance of :class:`.VARCHAR`
+:class:`_schema.Column` object within it would have an instance of :class:`.VARCHAR`
 present inside of it.
 
-The implication of this is that if a :class:`.Table` object makes use of type
+The implication of this is that if a :class:`_schema.Table` object makes use of type
 objects that don't correspond directly to the database-native type name, if we
-create a new :class:`.Table` object against a new :class:`.MetaData` collection
+create a new :class:`_schema.Table` object against a new :class:`_schema.MetaData` collection
 for this database table elsewhere using reflection, it will not have this
 datatype. For example::
 
@@ -599,7 +635,7 @@ object that was created by us directly, it is :class:`.PickleType`::
     >>> my_table.c.data.type
     PickleType()
 
-However, if we create another instance of :class:`.Table` using reflection,
+However, if we create another instance of :class:`_schema.Table` using reflection,
 the use of :class:`.PickleType` is not represented in the SQLite database we've
 created; we instead get back :class:`.BLOB`::
 
@@ -614,19 +650,19 @@ created; we instead get back :class:`.BLOB`::
     >>> my_reflected_table.c.data.type
     BLOB()
 
-Typically, when an application defines explicit :class:`.Table` metadata with
+Typically, when an application defines explicit :class:`_schema.Table` metadata with
 custom types, there is no need to use table reflection because the necessary
-:class:`.Table` metadata is already present.  However, for the case where an
+:class:`_schema.Table` metadata is already present.  However, for the case where an
 application, or a combination of them, need to make use of both explicit
-:class:`.Table` metadata which includes custom, Python-level datatypes, as well
-as :class:`.Table` objects which set up their :class:`.Column` objects as
+:class:`_schema.Table` metadata which includes custom, Python-level datatypes, as well
+as :class:`_schema.Table` objects which set up their :class:`_schema.Column` objects as
 reflected from the database, which nevertheless still need to exhibit the
 additional Python behaviors of the custom datatypes, additional steps must be
 taken to allow this.
 
 The most straightforward is to override specific columns as described at
 :ref:`reflection_overriding_columns`.  In this technique, we simply
-use reflection in combination with explicit :class:`.Column` objects for those
+use reflection in combination with explicit :class:`_schema.Column` objects for those
 columns for which we want to use a custom or decorated datatype::
 
     >>> metadata_three = MetaData()
@@ -634,9 +670,9 @@ columns for which we want to use a custom or decorated datatype::
 
 The ``my_reflected_table`` object above is reflected, and will load the
 definition of the "id" column from the SQLite database.  But for the "data"
-column, we've overridden the reflected object with an explicit :class:`.Column`
+column, we've overridden the reflected object with an explicit :class:`_schema.Column`
 definition that includes our desired in-Python datatype, the
-:class:`.PickleType`. The reflection process will leave this :class:`.Column`
+:class:`.PickleType`. The reflection process will leave this :class:`_schema.Column`
 object intact::
 
     >>> my_reflected_table.c.data.type
@@ -660,8 +696,8 @@ for example we knew that we wanted all :class:`.BLOB` datatypes to in fact be
 
 When the above code is invoked *before* any table reflection occurs (note also
 it should be invoked **only once** in the application, as it is a global rule),
-upon reflecting any :class:`.Table` that includes a column with a :class:`.BLOB`
-datatype, the resulting datatype will be stored in the :class:`.Column` object
+upon reflecting any :class:`_schema.Table` that includes a column with a :class:`.BLOB`
+datatype, the resulting datatype will be stored in the :class:`_schema.Column` object
 as :class:`.PickleType`.
 
 In practice, the above event-based approach would likely have additional rules

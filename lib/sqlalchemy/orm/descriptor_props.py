@@ -1,5 +1,5 @@
 # orm/descriptor_props.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -27,9 +27,11 @@ from ..sql import expression
 
 class DescriptorProperty(MapperProperty):
     """:class:`.MapperProperty` which proxies access to a
-        user-defined descriptor."""
+    user-defined descriptor."""
 
     doc = None
+
+    uses_objects = False
 
     def instrument_class(self, mapper):
         prop = self
@@ -41,7 +43,7 @@ class DescriptorProperty(MapperProperty):
 
             @property
             def uses_objects(self):
-                return getattr(mapper.class_, prop.name).impl.uses_objects
+                return prop.uses_objects
 
             def __init__(self, key):
                 self.key = key
@@ -182,6 +184,8 @@ class CompositeProperty(DescriptorProperty):
         """
         self._setup_arguments_on_columns()
 
+    _COMPOSITE_FGET = object()
+
     def _create_descriptor(self):
         """Create the Python descriptor that will serve as
         the access point on instances of the mapped class.
@@ -209,7 +213,9 @@ class CompositeProperty(DescriptorProperty):
                     state.key is not None or not _none_set.issuperset(values)
                 ):
                     dict_[self.key] = self.composite_class(*values)
-                    state.manager.dispatch.refresh(state, None, [self.key])
+                    state.manager.dispatch.refresh(
+                        state, self._COMPOSITE_FGET, [self.key]
+                    )
 
             return dict_.get(self.key, None)
 
@@ -283,16 +289,32 @@ class CompositeProperty(DescriptorProperty):
     def _setup_event_handlers(self):
         """Establish events that populate/expire the composite attribute."""
 
-        def load_handler(state, *args):
-            _load_refresh_handler(state, args, is_refresh=False)
+        def load_handler(state, context):
+            _load_refresh_handler(state, context, None, is_refresh=False)
 
-        def refresh_handler(state, *args):
-            _load_refresh_handler(state, args, is_refresh=True)
+        def refresh_handler(state, context, to_load):
+            # note this corresponds to sqlalchemy.ext.mutable load_attrs()
 
-        def _load_refresh_handler(state, args, is_refresh):
+            if not to_load or (
+                {self.key}.union(self._attribute_keys)
+            ).intersection(to_load):
+                _load_refresh_handler(state, context, to_load, is_refresh=True)
+
+        def _load_refresh_handler(state, context, to_load, is_refresh):
             dict_ = state.dict
 
-            if not is_refresh and self.key in dict_:
+            # if context indicates we are coming from the
+            # fget() handler, this already set the value; skip the
+            # handler here. (other handlers like mutablecomposite will still
+            # want to catch it)
+            # there's an insufficiency here in that the fget() handler
+            # really should not be using the refresh event and there should
+            # be some other event that mutablecomposite can subscribe
+            # towards for this.
+
+            if (
+                not is_refresh or context is self._COMPOSITE_FGET
+            ) and self.key in dict_:
                 return
 
             # if column elements aren't loaded, skip.
@@ -560,14 +582,18 @@ class SynonymProperty(DescriptorProperty):
 
         :param map_column: **For classical mappings and mappings against
           an existing Table object only**.  if ``True``, the :func:`.synonym`
-          construct will locate the :class:`.Column` object upon the mapped
+          construct will locate the :class:`_schema.Column`
+          object upon the mapped
           table that would normally be associated with the attribute name of
           this synonym, and produce a new :class:`.ColumnProperty` that instead
-          maps this :class:`.Column` to the alternate name given as the "name"
+          maps this :class:`_schema.Column`
+          to the alternate name given as the "name"
           argument of the synonym; in this way, the usual step of redefining
-          the mapping of the :class:`.Column` to be under a different name is
+          the mapping of the :class:`_schema.Column`
+          to be under a different name is
           unnecessary. This is usually intended to be used when a
-          :class:`.Column` is to be replaced with an attribute that also uses a
+          :class:`_schema.Column`
+          is to be replaced with an attribute that also uses a
           descriptor, that is, in conjunction with the
           :paramref:`.synonym.descriptor` parameter::
 
@@ -644,6 +670,10 @@ class SynonymProperty(DescriptorProperty):
             self.info = info
 
         util.set_creation_order(self)
+
+    @property
+    def uses_objects(self):
+        return getattr(self.parent.class_, self.name).impl.uses_objects
 
     # TODO: when initialized, check _proxied_property,
     # emit a warning if its not a column-based property
@@ -766,7 +796,7 @@ class ComparableProperty(DescriptorProperty):
         A mapping like the above allows the ``word_insensitive`` attribute
         to render an expression like::
 
-            >>> print SearchWord.word_insensitive == "Trucks"
+            >>> print(SearchWord.word_insensitive == "Trucks")
             lower(search_word.word) = lower(:lower_1)
 
         :param comparator_factory:

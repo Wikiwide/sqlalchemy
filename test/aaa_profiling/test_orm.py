@@ -1,12 +1,16 @@
+from sqlalchemy import and_
 from sqlalchemy import ForeignKey
 from sqlalchemy import inspect
 from sqlalchemy import Integer
+from sqlalchemy import join
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Bundle
 from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import defaultload
 from sqlalchemy.orm import defer
+from sqlalchemy.orm import join as orm_join
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import Load
 from sqlalchemy.orm import mapper
@@ -21,6 +25,8 @@ from sqlalchemy.testing.schema import Table
 
 
 class MergeTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -68,11 +74,13 @@ class MergeTest(fixtures.MappedTest):
         mapper(Child, child)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         parent, child = cls.tables.parent, cls.tables.child
 
-        parent.insert().execute({"id": 1, "data": "p1"})
-        child.insert().execute({"id": 1, "data": "p1c1", "parent_id": 1})
+        connection.execute(parent.insert(), {"id": 1, "data": "p1"})
+        connection.execute(
+            child.insert(), {"id": 1, "data": "p1c1", "parent_id": 1}
+        )
 
     def test_merge_no_load(self):
         Parent = self.classes.Parent
@@ -85,7 +93,7 @@ class MergeTest(fixtures.MappedTest):
         # down from 185 on this this is a small slice of a usually
         # bigger operation so using a small variance
 
-        @profiling.function_call_count(variance=0.10)
+        @profiling.function_call_count(variance=0.20)
         def go1():
             return sess2.merge(p1, load=False)
 
@@ -93,7 +101,7 @@ class MergeTest(fixtures.MappedTest):
 
         # third call, merge object already present. almost no calls.
 
-        @profiling.function_call_count(variance=0.10)
+        @profiling.function_call_count(variance=0.20, warmup=1)
         def go2():
             return sess2.merge(p2, load=False)
 
@@ -137,6 +145,8 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
 
     """
 
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -175,13 +185,15 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
         mapper(Child, child)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         parent, child = cls.tables.parent, cls.tables.child
 
-        child.insert().execute(
-            [{"id": i, "data": "c%d" % i} for i in range(1, 251)]
+        connection.execute(
+            child.insert(),
+            [{"id": i, "data": "c%d" % i} for i in range(1, 251)],
         )
-        parent.insert().execute(
+        connection.execute(
+            parent.insert(),
             [
                 {
                     "id": i,
@@ -189,7 +201,7 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
                     "child_id": (i % 250) + 1,
                 }
                 for i in range(1, 1000)
-            ]
+            ],
         )
 
     def test_many_to_one_load_no_identity(self):
@@ -222,6 +234,8 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
 
 
 class MergeBackrefsTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -276,9 +290,9 @@ class MergeBackrefsTest(fixtures.MappedTest):
         mapper(D, d)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C, D = cls.classes.A, cls.classes.B, cls.classes.C, cls.classes.D
-        s = Session()
+        s = Session(connection)
         s.add_all(
             [
                 A(
@@ -314,6 +328,8 @@ class MergeBackrefsTest(fixtures.MappedTest):
 
 
 class DeferOptionsTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -340,9 +356,9 @@ class DeferOptionsTest(fixtures.MappedTest):
         mapper(A, a)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A = cls.classes.A
-        s = Session()
+        s = Session(connection)
         s.add_all(
             [
                 A(
@@ -376,6 +392,8 @@ class DeferOptionsTest(fixtures.MappedTest):
 
 
 class AttributeOverheadTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -453,6 +471,8 @@ class AttributeOverheadTest(fixtures.MappedTest):
 
 
 class SessionTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -517,6 +537,8 @@ class SessionTest(fixtures.MappedTest):
 
 
 class QueryTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -580,6 +602,8 @@ class SelectInEagerLoadTest(fixtures.MappedTest):
 
     """
 
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
 
@@ -634,9 +658,9 @@ class SelectInEagerLoadTest(fixtures.MappedTest):
         mapper(C, c)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C = cls.classes("A", "B", "C")
-        s = Session()
+        s = Session(connection)
         s.add(A(bs=[B(cs=[C()]), B(cs=[C()])]))
         s.commit()
 
@@ -658,6 +682,8 @@ class SelectInEagerLoadTest(fixtures.MappedTest):
 
 
 class JoinedEagerLoadTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         def make_some_columns():
@@ -763,9 +789,9 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
         mapper(G, g)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C, D, E, F, G = cls.classes("A", "B", "C", "D", "E", "F", "G")
-        s = Session()
+        s = Session(connection)
         s.add(
             A(
                 bs=[B(cs=[C(ds=[D()])]), B(cs=[C()])],
@@ -803,10 +829,13 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
         )
 
         context = q._compile_context()
+        attributes = dict(context.attributes)
 
         @profiling.function_call_count()
         def go():
             for i in range(100):
+                # make sure these get reset each time
+                context.attributes = attributes.copy()
                 obj = q._execute_and_instances(context)
                 list(obj)
                 sess.close()
@@ -814,7 +843,98 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
         go()
 
 
+class JoinConditionTest(fixtures.DeclarativeMappedTest):
+    __requires__ = ("python_profiling_backend",)
+
+    @classmethod
+    def setup_classes(cls):
+        class A(cls.DeclarativeBasic):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            b_id = Column(ForeignKey("b.id"))
+            b = relationship("B")
+
+        class B(cls.DeclarativeBasic):
+            __tablename__ = "b"
+
+            id = Column(Integer, primary_key=True)
+            d_id = Column(ForeignKey("d.id"))
+
+        class C(cls.DeclarativeBasic):
+            __tablename__ = "c"
+
+            id = Column(Integer, primary_key=True)
+            a_id = Column(ForeignKey("a.id"))
+            d_id = Column(ForeignKey("d.id"))
+
+        class D(cls.DeclarativeBasic):
+            __tablename__ = "d"
+
+            id = Column(Integer, primary_key=True)
+
+        j = join(B, D, B.d_id == D.id).join(C, C.d_id == D.id)
+
+        A.d = relationship(
+            "D",
+            secondary=j,
+            primaryjoin=and_(A.b_id == B.id, A.id == C.a_id),
+            secondaryjoin=D.id == B.d_id,
+            uselist=False,
+            viewonly=True,
+        )
+
+    def test_a_to_b_plain(self):
+        A, B = self.classes("A", "B")
+
+        # should not use aliasing or adaption so should be cheap
+        @profiling.function_call_count(times=50, warmup=1)
+        def go():
+            orm_join(A, B, A.b)
+
+        go()
+
+    def test_a_to_b_aliased(self):
+        A, B = self.classes("A", "B")
+
+        a1 = aliased(A)
+
+        # uses aliasing, therefore adaption which is expensive
+        @profiling.function_call_count(times=50, warmup=1)
+        def go():
+            orm_join(a1, B, a1.b)
+
+        go()
+
+    def test_a_to_d(self):
+        A, D = self.classes("A", "D")
+
+        # the join condition between A and D uses a secondary selectable  with
+        # overlap so incurs aliasing, which is expensive, there is also a check
+        # that determines that this overlap exists which is not currently
+        # cached
+        @profiling.function_call_count(times=50, warmup=1)
+        def go():
+            orm_join(A, D, A.d)
+
+        go()
+
+    def test_a_to_d_aliased(self):
+        A, D = self.classes("A", "D")
+
+        a1 = aliased(A)
+
+        # aliased, uses adaption therefore expensive
+        @profiling.function_call_count(times=50, warmup=1)
+        def go():
+            orm_join(a1, D, a1.d)
+
+        go()
+
+
 class BranchedOptionTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         def make_some_columns():
@@ -943,7 +1063,7 @@ class BranchedOptionTest(fixtures.MappedTest):
 
         cache_path = inspect(A)._path_registry
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for opt in opts:
                 opt._generate_cache_key(cache_path)
@@ -963,7 +1083,7 @@ class BranchedOptionTest(fixtures.MappedTest):
 
         cache_path = inspect(A)._path_registry
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for opt in opts:
                 opt._generate_cache_key(cache_path)
@@ -983,7 +1103,7 @@ class BranchedOptionTest(fixtures.MappedTest):
 
         q = Session().query(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             q.options(*opts)
 
@@ -1002,7 +1122,7 @@ class BranchedOptionTest(fixtures.MappedTest):
 
         q = Session().query(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             q.options(*opts)
 
@@ -1010,6 +1130,8 @@ class BranchedOptionTest(fixtures.MappedTest):
 
 
 class AnnotatedOverheadTest(fixtures.MappedTest):
+    __requires__ = ("python_profiling_backend",)
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -1034,9 +1156,9 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         mapper(A, a)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A = cls.classes.A
-        s = Session()
+        s = Session(connection)
         s.add_all([A(data="asdf") for i in range(5)])
         s.commit()
 
@@ -1046,7 +1168,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
 
         q = s.query(A).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1060,7 +1182,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
 
         q = s.query(a.c.data).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1072,7 +1194,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(A.data).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1084,7 +1206,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(A, A.data).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1097,7 +1219,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(A, a.c.data).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1110,7 +1232,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(a.c.data, A).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1122,7 +1244,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(A.data, A).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1135,7 +1257,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(Bundle("ASdf", a.c.data), A).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()
@@ -1147,7 +1269,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         s = Session()
         q = s.query(Bundle("ASdf", A.data), A).select_from(A)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 q.all()

@@ -1,5 +1,5 @@
 # sql/functions.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -57,14 +57,14 @@ def register_function(identifier, fn, package="_default"):
     reg = _registry[package]
     case_sensitive_reg = _case_sensitive_registry[package]
     raw_identifier = identifier
-    identifier = identifier.lower()
+    identifier = util.text_type(identifier).lower()
 
     # Check if a function with the same lowercase identifier is registered.
     if identifier in reg and reg[identifier] is not _CASE_SENSITIVE:
         if raw_identifier in case_sensitive_reg[identifier]:
             util.warn(
                 "The GenericFunction '{}' is already registered and "
-                "is going to be overriden.".format(identifier)
+                "is going to be overridden.".format(identifier)
             )
             reg[identifier] = fn
         else:
@@ -116,6 +116,8 @@ class FunctionElement(Executable, ColumnElement, FromClause):
 
     .. seealso::
 
+        :ref:`coretutorial_functions` - in the Core tutorial
+
         :class:`.Function` - named SQL function.
 
         :data:`.func` - namespace which produces registered or ad-hoc
@@ -131,7 +133,20 @@ class FunctionElement(Executable, ColumnElement, FromClause):
     _has_args = False
 
     def __init__(self, *clauses, **kwargs):
-        """Construct a :class:`.FunctionElement`.
+        r"""Construct a :class:`.FunctionElement`.
+
+        :param \*clauses: list of column expressions that form the arguments
+         of the SQL function call.
+
+        :param \**kwargs:  additional kwargs are typically consumed by
+         subclasses.
+
+        .. seealso::
+
+            :data:`.func`
+
+            :class:`.Function`
+
         """
         args = [_literal_as_binds(c, self.name) for c in clauses]
         self._has_args = self._has_args or bool(args)
@@ -144,14 +159,14 @@ class FunctionElement(Executable, ColumnElement, FromClause):
 
     @property
     def columns(self):
-        """The set of columns exported by this :class:`.FunctionElement`.
+        r"""The set of columns exported by this :class:`.FunctionElement`.
 
         Function objects currently have no result column names built in;
         this method returns a single-element column collection with
         an anonymously named column.
 
         An interim approach to providing named columns for a function
-        as a FROM clause is to build a :func:`.select` with the
+        as a FROM clause is to build a :func:`_expression.select` with the
         desired columns::
 
             from sqlalchemy.sql import column
@@ -186,7 +201,7 @@ class FunctionElement(Executable, ColumnElement, FromClause):
             from sqlalchemy import over
             over(func.row_number(), order_by='x')
 
-        See :func:`~.expression.over` for a full description.
+        See :func:`_expression.over` for a full description.
 
         """
         return Over(
@@ -204,7 +219,7 @@ class FunctionElement(Executable, ColumnElement, FromClause):
         set aggregate" functions, including :class:`.percentile_cont`,
         :class:`.rank`, :class:`.dense_rank`, etc.
 
-        See :func:`~.expression.within_group` for a full description.
+        See :func:`_expression.within_group` for a full description.
 
         .. versionadded:: 1.1
 
@@ -268,7 +283,8 @@ class FunctionElement(Executable, ColumnElement, FromClause):
         to manipulate the "left" and "right" sides of the ON clause of a JOIN
         expression. The purpose of this method is to provide a SQL function
         construct that can also supply this information to the ORM, when used
-        with the :paramref:`.relationship.primaryjoin` parameter.  The return
+        with the :paramref:`_orm.relationship.primaryjoin` parameter.
+        The return
         value is a containment object called :class:`.FunctionAsBinary`.
 
         An ORM example is as follows::
@@ -331,7 +347,7 @@ class FunctionElement(Executable, ColumnElement, FromClause):
         return None
 
     def alias(self, name=None, flat=False):
-        r"""Produce a :class:`.Alias` construct against this
+        r"""Produce a :class:`_expression.Alias` construct against this
         :class:`.FunctionElement`.
 
         This construct wraps the function in a named alias which
@@ -363,7 +379,7 @@ class FunctionElement(Executable, ColumnElement, FromClause):
         return Alias._construct(self, name)
 
     def select(self):
-        """Produce a :func:`~.expression.select` construct
+        """Produce a :func:`_expression.select` construct
         against this :class:`.FunctionElement`.
 
         This is shorthand for::
@@ -384,8 +400,8 @@ class FunctionElement(Executable, ColumnElement, FromClause):
         produce a SELECT construct.
 
         Note that :class:`.FunctionElement` can be passed to
-        the :meth:`.Connectable.scalar` method of :class:`.Connection`
-        or :class:`.Engine`.
+        the :meth:`.Connectable.scalar` method of :class:`_engine.Connection`
+        or :class:`_engine.Engine`.
 
         """
         return self.select().execute().scalar()
@@ -398,8 +414,8 @@ class FunctionElement(Executable, ColumnElement, FromClause):
         produce a SELECT construct.
 
         Note that :class:`.FunctionElement` can be passed to
-        the :meth:`.Connectable.execute` method of :class:`.Connection`
-        or :class:`.Engine`.
+        the :meth:`.Connectable.execute` method of :class:`_engine.Connection`
+        or :class:`_engine.Engine`.
 
         """
         return self.select().execute()
@@ -466,7 +482,81 @@ class FunctionAsBinary(BinaryExpression):
 
 
 class _FunctionGenerator(object):
-    """Generate :class:`.Function` objects based on getattr calls."""
+    """Generate SQL function expressions.
+
+    :data:`.func` is a special object instance which generates SQL
+    functions based on name-based attributes, e.g.::
+
+        >>> print(func.count(1))
+        count(:param_1)
+
+    The returned object is an instance of :class:`.Function`, and  is a
+    column-oriented SQL element like any other, and is used in that way::
+
+        >>> print(select([func.count(table.c.id)]))
+        SELECT count(sometable.id) FROM sometable
+
+    Any name can be given to :data:`.func`. If the function name is unknown to
+    SQLAlchemy, it will be rendered exactly as is. For common SQL functions
+    which SQLAlchemy is aware of, the name may be interpreted as a *generic
+    function* which will be compiled appropriately to the target database::
+
+        >>> print(func.current_timestamp())
+        CURRENT_TIMESTAMP
+
+    To call functions which are present in dot-separated packages,
+    specify them in the same manner::
+
+        >>> print(func.stats.yield_curve(5, 10))
+        stats.yield_curve(:yield_curve_1, :yield_curve_2)
+
+    SQLAlchemy can be made aware of the return type of functions to enable
+    type-specific lexical and result-based behavior. For example, to ensure
+    that a string-based function returns a Unicode value and is similarly
+    treated as a string in expressions, specify
+    :class:`~sqlalchemy.types.Unicode` as the type:
+
+        >>> print(func.my_string(u'hi', type_=Unicode) + ' ' +
+        ...       func.my_string(u'there', type_=Unicode))
+        my_string(:my_string_1) || :my_string_2 || my_string(:my_string_3)
+
+    The object returned by a :data:`.func` call is usually an instance of
+    :class:`.Function`.
+    This object meets the "column" interface, including comparison and labeling
+    functions.  The object can also be passed the :meth:`~.Connectable.execute`
+    method of a :class:`_engine.Connection` or :class:`_engine.Engine`,
+    where it will be
+    wrapped inside of a SELECT statement first::
+
+        print(connection.execute(func.current_timestamp()).scalar())
+
+    In a few exception cases, the :data:`.func` accessor
+    will redirect a name to a built-in expression such as :func:`.cast`
+    or :func:`.extract`, as these names have well-known meaning
+    but are not exactly the same as "functions" from a SQLAlchemy
+    perspective.
+
+    Functions which are interpreted as "generic" functions know how to
+    calculate their return type automatically. For a listing of known generic
+    functions, see :ref:`generic_functions`.
+
+    .. note::
+
+        The :data:`.func` construct has only limited support for calling
+        standalone "stored procedures", especially those with special
+        parameterization concerns.
+
+        See the section :ref:`stored_procedures` for details on how to use
+        the DBAPI-level ``callproc()`` method for fully traditional stored
+        procedures.
+
+    .. seealso::
+
+        :ref:`coretutorial_functions` - in the Core Tutorial
+
+        :class:`.Function`
+
+    """
 
     def __init__(self, **opts):
         self.__names = []
@@ -514,85 +604,36 @@ class _FunctionGenerator(object):
 
 
 func = _FunctionGenerator()
-"""Generate SQL function expressions.
-
-   :data:`.func` is a special object instance which generates SQL
-   functions based on name-based attributes, e.g.::
-
-        >>> print(func.count(1))
-        count(:param_1)
-
-   The element is a column-oriented SQL element like any other, and is
-   used in that way::
-
-        >>> print(select([func.count(table.c.id)]))
-        SELECT count(sometable.id) FROM sometable
-
-   Any name can be given to :data:`.func`. If the function name is unknown to
-   SQLAlchemy, it will be rendered exactly as is. For common SQL functions
-   which SQLAlchemy is aware of, the name may be interpreted as a *generic
-   function* which will be compiled appropriately to the target database::
-
-        >>> print(func.current_timestamp())
-        CURRENT_TIMESTAMP
-
-   To call functions which are present in dot-separated packages,
-   specify them in the same manner::
-
-        >>> print(func.stats.yield_curve(5, 10))
-        stats.yield_curve(:yield_curve_1, :yield_curve_2)
-
-   SQLAlchemy can be made aware of the return type of functions to enable
-   type-specific lexical and result-based behavior. For example, to ensure
-   that a string-based function returns a Unicode value and is similarly
-   treated as a string in expressions, specify
-   :class:`~sqlalchemy.types.Unicode` as the type:
-
-        >>> print(func.my_string(u'hi', type_=Unicode) + ' ' +
-        ...       func.my_string(u'there', type_=Unicode))
-        my_string(:my_string_1) || :my_string_2 || my_string(:my_string_3)
-
-   The object returned by a :data:`.func` call is usually an instance of
-   :class:`.Function`.
-   This object meets the "column" interface, including comparison and labeling
-   functions.  The object can also be passed the :meth:`~.Connectable.execute`
-   method of a :class:`.Connection` or :class:`.Engine`, where it will be
-   wrapped inside of a SELECT statement first::
-
-        print(connection.execute(func.current_timestamp()).scalar())
-
-   In a few exception cases, the :data:`.func` accessor
-   will redirect a name to a built-in expression such as :func:`.cast`
-   or :func:`.extract`, as these names have well-known meaning
-   but are not exactly the same as "functions" from a SQLAlchemy
-   perspective.
-
-   Functions which are interpreted as "generic" functions know how to
-   calculate their return type automatically. For a listing of known generic
-   functions, see :ref:`generic_functions`.
-
-   .. note::
-
-        The :data:`.func` construct has only limited support for calling
-        standalone "stored procedures", especially those with special
-        parameterization concerns.
-
-        See the section :ref:`stored_procedures` for details on how to use
-        the DBAPI-level ``callproc()`` method for fully traditional stored
-        procedures.
-
-"""
+func.__doc__ = _FunctionGenerator.__doc__
 
 modifier = _FunctionGenerator(group=False)
 
 
 class Function(FunctionElement):
-    """Describe a named SQL function.
+    r"""Describe a named SQL function.
 
-    See the superclass :class:`.FunctionElement` for a description
-    of public methods.
+    The :class:`.Function` object is typically generated from the
+    :data:`.func` generation object.
+
+
+    :param \*clauses: list of column expressions that form the arguments
+     of the SQL function call.
+
+    :param type\_: optional :class:`.TypeEngine` datatype object that will be
+     used as the return value of the column expression generated by this
+     function call.
+
+    :param packagenames: a string which indicates package prefix names
+     to be prepended to the function name when the SQL is generated.
+     The :data:`.func` generator creates these when it is called using
+     dotted format, e.g.::
+
+        func.mypackage.some_function(col1, col2)
+
 
     .. seealso::
+
+        :ref:`coretutorial_functions`
 
         :data:`.func` - namespace which produces registered or ad-hoc
         :class:`.Function` instances.
@@ -677,7 +718,7 @@ class GenericFunction(util.with_metaclass(_GenericMeta, Function)):
         class as_utc(GenericFunction):
             type = DateTime
 
-        print select([func.as_utc()])
+        print(select([func.as_utc()]))
 
     User-defined generic functions can be organized into
     packages by specifying the "package" attribute when defining
@@ -694,7 +735,7 @@ class GenericFunction(util.with_metaclass(_GenericMeta, Function)):
     The above function would be available from :data:`.func`
     using the package name ``time``::
 
-        print select([func.time.as_utc()])
+        print(select([func.time.as_utc()]))
 
     A final option is to allow the function to be accessed
     from one name in :data:`.func` but to render as a different name.
@@ -710,8 +751,32 @@ class GenericFunction(util.with_metaclass(_GenericMeta, Function)):
 
     The above function will render as follows::
 
-        >>> print func.geo.buffer()
+        >>> print(func.geo.buffer())
         ST_Buffer()
+
+    The name will be rendered as is, however without quoting unless the name
+    contains special characters that require quoting.  To force quoting
+    on or off for the name, use the :class:`.sqlalchemy.sql.quoted_name`
+    construct::
+
+        from sqlalchemy.sql import quoted_name
+
+        class GeoBuffer(GenericFunction):
+            type = Geometry
+            package = "geo"
+            name = quoted_name("ST_Buffer", True)
+            identifier = "buffer"
+
+    The above function will render as::
+
+        >>> print(func.geo.buffer())
+        "ST_Buffer"()
+
+    .. versionadded:: 1.3.13  The :class:`.quoted_name` construct is now
+       recognized for quoting when used with the "name" attribute of the
+       object, so that quoting can be forced on or off for the function
+       name.
+
 
     """
 
@@ -878,10 +943,10 @@ class user(AnsiFunction):
 
 
 class array_agg(GenericFunction):
-    """support for the ARRAY_AGG function.
+    """Support for the ARRAY_AGG function.
 
     The ``func.array_agg(expr)`` construct returns an expression of
-    type :class:`.types.ARRAY`.
+    type :class:`_types.ARRAY`.
 
     e.g.::
 
@@ -891,8 +956,8 @@ class array_agg(GenericFunction):
 
     .. seealso::
 
-        :func:`.postgresql.array_agg` - PostgreSQL-specific version that
-        returns :class:`.postgresql.ARRAY`, which has PG-specific operators
+        :func:`_postgresql.array_agg` - PostgreSQL-specific version that
+        returns :class:`_postgresql.ARRAY`, which has PG-specific operators
         added.
 
     """
@@ -931,7 +996,7 @@ class OrderedSetAgg(GenericFunction):
 
 
 class mode(OrderedSetAgg):
-    """implement the ``mode`` ordered-set aggregate function.
+    """Implement the ``mode`` ordered-set aggregate function.
 
     This function must be used with the :meth:`.FunctionElement.within_group`
     modifier to supply a sort expression to operate upon.
@@ -944,13 +1009,13 @@ class mode(OrderedSetAgg):
 
 
 class percentile_cont(OrderedSetAgg):
-    """implement the ``percentile_cont`` ordered-set aggregate function.
+    """Implement the ``percentile_cont`` ordered-set aggregate function.
 
     This function must be used with the :meth:`.FunctionElement.within_group`
     modifier to supply a sort expression to operate upon.
 
     The return type of this function is the same as the sort expression,
-    or if the arguments are an array, an :class:`.types.ARRAY` of the sort
+    or if the arguments are an array, an :class:`_types.ARRAY` of the sort
     expression's type.
 
     .. versionadded:: 1.1
@@ -961,13 +1026,13 @@ class percentile_cont(OrderedSetAgg):
 
 
 class percentile_disc(OrderedSetAgg):
-    """implement the ``percentile_disc`` ordered-set aggregate function.
+    """Implement the ``percentile_disc`` ordered-set aggregate function.
 
     This function must be used with the :meth:`.FunctionElement.within_group`
     modifier to supply a sort expression to operate upon.
 
     The return type of this function is the same as the sort expression,
-    or if the arguments are an array, an :class:`.types.ARRAY` of the sort
+    or if the arguments are an array, an :class:`_types.ARRAY` of the sort
     expression's type.
 
     .. versionadded:: 1.1
@@ -1041,7 +1106,7 @@ class cube(GenericFunction):
     r"""Implement the ``CUBE`` grouping operation.
 
     This function is used as part of the GROUP BY of a statement,
-    e.g. :meth:`.Select.group_by`::
+    e.g. :meth:`_expression.Select.group_by`::
 
         stmt = select(
             [func.sum(table.c.value), table.c.col_1, table.c.col_2]
@@ -1057,7 +1122,7 @@ class rollup(GenericFunction):
     r"""Implement the ``ROLLUP`` grouping operation.
 
     This function is used as part of the GROUP BY of a statement,
-    e.g. :meth:`.Select.group_by`::
+    e.g. :meth:`_expression.Select.group_by`::
 
         stmt = select(
             [func.sum(table.c.value), table.c.col_1, table.c.col_2]
@@ -1073,7 +1138,7 @@ class grouping_sets(GenericFunction):
     r"""Implement the ``GROUPING SETS`` grouping operation.
 
     This function is used as part of the GROUP BY of a statement,
-    e.g. :meth:`.Select.group_by`::
+    e.g. :meth:`_expression.Select.group_by`::
 
         stmt = select(
             [func.sum(table.c.value), table.c.col_1, table.c.col_2]

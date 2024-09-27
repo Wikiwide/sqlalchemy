@@ -10,6 +10,7 @@ styling and coherent test organization.
 
 """
 
+import datetime
 import decimal
 
 from sqlalchemy import alias
@@ -48,6 +49,7 @@ from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import subquery
 from sqlalchemy import Table
+from sqlalchemy import testing
 from sqlalchemy import Text
 from sqlalchemy import text
 from sqlalchemy import TIMESTAMP
@@ -72,6 +74,7 @@ from sqlalchemy.sql import compiler
 from sqlalchemy.sql import label
 from sqlalchemy.sql import table
 from sqlalchemy.sql.expression import _literal_as_text
+from sqlalchemy.sql.expression import ClauseElement
 from sqlalchemy.sql.expression import ClauseList
 from sqlalchemy.sql.expression import HasPrefixes
 from sqlalchemy.testing import assert_raises
@@ -81,6 +84,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import eq_ignore_whitespace
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import mock
 from sqlalchemy.util import u
 
 
@@ -142,6 +146,53 @@ keyed = Table(
     Column("y", Integer, key="coly"),
     Column("z", Integer),
 )
+
+
+class TestCompilerFixture(fixtures.TestBase, AssertsCompiledSQL):
+    def test_dont_access_statement(self):
+        def visit_foobar(self, element, **kw):
+            self.statement.table
+
+        class Foobar(ClauseElement):
+            __visit_name__ = "foobar"
+
+        with mock.patch.object(
+            testing.db.dialect.statement_compiler,
+            "visit_foobar",
+            visit_foobar,
+            create=True,
+        ):
+            assert_raises_message(
+                NotImplementedError,
+                "compiler accessed .statement; use "
+                "compiler.current_executable",
+                self.assert_compile,
+                Foobar(),
+                "",
+            )
+
+    def test_no_stack(self):
+        def visit_foobar(self, element, **kw):
+            self.current_executable.table
+
+        class Foobar(ClauseElement):
+            __visit_name__ = "foobar"
+
+        with mock.patch.object(
+            testing.db.dialect.statement_compiler,
+            "visit_foobar",
+            visit_foobar,
+            create=True,
+        ):
+            compiler = testing.db.dialect.statement_compiler(
+                testing.db.dialect, None
+            )
+            assert_raises_message(
+                IndexError,
+                "Compiler does not have a stack entry",
+                compiler.process,
+                Foobar(),
+            )
 
 
 class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -311,20 +362,6 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
                 "SELECT 1 " + exp,
                 checkparams=params,
             )
-
-    def test_limit_offset_select_literal_binds(self):
-        stmt = select([1]).limit(5).offset(6)
-        self.assert_compile(
-            stmt, "SELECT 1 LIMIT 5 OFFSET 6", literal_binds=True
-        )
-
-    def test_limit_offset_compound_select_literal_binds(self):
-        stmt = select([1]).union(select([2])).limit(5).offset(6)
-        self.assert_compile(
-            stmt,
-            "SELECT 1 UNION SELECT 2 LIMIT 5 OFFSET 6",
-            literal_binds=True,
-        )
 
     def test_select_precol_compile_ordering(self):
         s1 = select([column("x")]).select_from(text("a")).limit(5).as_scalar()
@@ -571,9 +608,7 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(s.positiontup, ["a", "b", "c"])
 
     def test_nested_label_targeting(self):
-        """test nested anonymous label generation.
-
-        """
+        """test nested anonymous label generation."""
         s1 = table1.select()
         s2 = s1.alias()
         s3 = select([s2], use_labels=True)
@@ -1321,20 +1356,6 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT mytable.myid FROM mytable",
         )
 
-    def test_multiple_col_binds(self):
-        self.assert_compile(
-            select(
-                [literal_column("*")],
-                or_(
-                    table1.c.myid == 12,
-                    table1.c.myid == "asdf",
-                    table1.c.myid == "foo",
-                ),
-            ),
-            "SELECT * FROM mytable WHERE mytable.myid = :myid_1 "
-            "OR mytable.myid = :myid_2 OR mytable.myid = :myid_3",
-        )
-
     def test_order_by_nulls(self):
         self.assert_compile(
             table2.select(
@@ -1602,71 +1623,6 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT SQL_SOME_WEIRD_MYSQL_THING "
             "mytable.myid, mytable.name, mytable.description FROM mytable",
             dialect=mysql.dialect(),
-        )
-
-    def test_render_binds_as_literal(self):
-        """test a compiler that renders binds inline into
-        SQL in the columns clause."""
-
-        dialect = default.DefaultDialect()
-
-        class Compiler(dialect.statement_compiler):
-            ansi_bind_rules = True
-
-        dialect.statement_compiler = Compiler
-
-        self.assert_compile(
-            select([literal("someliteral")]),
-            "SELECT 'someliteral' AS anon_1",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            select([table1.c.myid + 3]),
-            "SELECT mytable.myid + 3 AS anon_1 FROM mytable",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            select([table1.c.myid.in_([4, 5, 6])]),
-            "SELECT mytable.myid IN (4, 5, 6) AS anon_1 FROM mytable",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            select([func.mod(table1.c.myid, 5)]),
-            "SELECT mod(mytable.myid, 5) AS mod_1 FROM mytable",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            select([literal("foo").in_([])]),
-            "SELECT 1 != 1 AS anon_1",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            select([literal(util.b("foo"))]),
-            "SELECT 'foo' AS anon_1",
-            dialect=dialect,
-        )
-
-        # test callable
-        self.assert_compile(
-            select([table1.c.myid == bindparam("foo", callable_=lambda: 5)]),
-            "SELECT mytable.myid = 5 AS anon_1 FROM mytable",
-            dialect=dialect,
-        )
-
-        empty_in_dialect = default.DefaultDialect(empty_in_strategy="dynamic")
-        empty_in_dialect.statement_compiler = Compiler
-
-        assert_raises_message(
-            exc.CompileError,
-            "Bind parameter 'foo' without a "
-            "renderable value not allowed here.",
-            bindparam("foo").in_([]).compile,
-            dialect=empty_in_dialect,
         )
 
     def test_collate(self):
@@ -2148,369 +2104,6 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
             "FROM (SELECT foo, bar "
             "FROM bat"
             " LIMIT -1 OFFSET :param_2) AS anon_2",
-        )
-
-    def test_binds(self):
-        for (
-            stmt,
-            expected_named_stmt,
-            expected_positional_stmt,
-            expected_default_params_dict,
-            expected_default_params_list,
-            test_param_dict,
-            expected_test_params_dict,
-            expected_test_params_list,
-        ) in [
-            (
-                select(
-                    [table1, table2],
-                    and_(
-                        table1.c.myid == table2.c.otherid,
-                        table1.c.name == bindparam("mytablename"),
-                    ),
-                ),
-                "SELECT mytable.myid, mytable.name, mytable.description, "
-                "myothertable.otherid, myothertable.othername FROM mytable, "
-                "myothertable WHERE mytable.myid = myothertable.otherid "
-                "AND mytable.name = :mytablename",
-                "SELECT mytable.myid, mytable.name, mytable.description, "
-                "myothertable.otherid, myothertable.othername FROM mytable, "
-                "myothertable WHERE mytable.myid = myothertable.otherid AND "
-                "mytable.name = ?",
-                {"mytablename": None},
-                [None],
-                {"mytablename": 5},
-                {"mytablename": 5},
-                [5],
-            ),
-            (
-                select(
-                    [table1],
-                    or_(
-                        table1.c.myid == bindparam("myid"),
-                        table2.c.otherid == bindparam("myid"),
-                    ),
-                ),
-                "SELECT mytable.myid, mytable.name, mytable.description "
-                "FROM mytable, myothertable WHERE mytable.myid = :myid "
-                "OR myothertable.otherid = :myid",
-                "SELECT mytable.myid, mytable.name, mytable.description "
-                "FROM mytable, myothertable WHERE mytable.myid = ? "
-                "OR myothertable.otherid = ?",
-                {"myid": None},
-                [None, None],
-                {"myid": 5},
-                {"myid": 5},
-                [5, 5],
-            ),
-            (
-                text(
-                    "SELECT mytable.myid, mytable.name, "
-                    "mytable.description FROM "
-                    "mytable, myothertable WHERE mytable.myid = :myid OR "
-                    "myothertable.otherid = :myid"
-                ),
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = :myid OR "
-                "myothertable.otherid = :myid",
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = ? OR "
-                "myothertable.otherid = ?",
-                {"myid": None},
-                [None, None],
-                {"myid": 5},
-                {"myid": 5},
-                [5, 5],
-            ),
-            (
-                select(
-                    [table1],
-                    or_(
-                        table1.c.myid == bindparam("myid", unique=True),
-                        table2.c.otherid == bindparam("myid", unique=True),
-                    ),
-                ),
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = "
-                ":myid_1 OR myothertable.otherid = :myid_2",
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = ? "
-                "OR myothertable.otherid = ?",
-                {"myid_1": None, "myid_2": None},
-                [None, None],
-                {"myid_1": 5, "myid_2": 6},
-                {"myid_1": 5, "myid_2": 6},
-                [5, 6],
-            ),
-            (
-                bindparam("test", type_=String, required=False) + text("'hi'"),
-                ":test || 'hi'",
-                "? || 'hi'",
-                {"test": None},
-                [None],
-                {},
-                {"test": None},
-                [None],
-            ),
-            (
-                # testing select.params() here - bindparam() objects
-                # must get required flag set to False
-                select(
-                    [table1],
-                    or_(
-                        table1.c.myid == bindparam("myid"),
-                        table2.c.otherid == bindparam("myotherid"),
-                    ),
-                ).params({"myid": 8, "myotherid": 7}),
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = "
-                ":myid OR myothertable.otherid = :myotherid",
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = "
-                "? OR myothertable.otherid = ?",
-                {"myid": 8, "myotherid": 7},
-                [8, 7],
-                {"myid": 5},
-                {"myid": 5, "myotherid": 7},
-                [5, 7],
-            ),
-            (
-                select(
-                    [table1],
-                    or_(
-                        table1.c.myid
-                        == bindparam("myid", value=7, unique=True),
-                        table2.c.otherid
-                        == bindparam("myid", value=8, unique=True),
-                    ),
-                ),
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = "
-                ":myid_1 OR myothertable.otherid = :myid_2",
-                "SELECT mytable.myid, mytable.name, mytable.description FROM "
-                "mytable, myothertable WHERE mytable.myid = "
-                "? OR myothertable.otherid = ?",
-                {"myid_1": 7, "myid_2": 8},
-                [7, 8],
-                {"myid_1": 5, "myid_2": 6},
-                {"myid_1": 5, "myid_2": 6},
-                [5, 6],
-            ),
-        ]:
-
-            self.assert_compile(
-                stmt, expected_named_stmt, params=expected_default_params_dict
-            )
-            self.assert_compile(
-                stmt, expected_positional_stmt, dialect=sqlite.dialect()
-            )
-            nonpositional = stmt.compile()
-            positional = stmt.compile(dialect=sqlite.dialect())
-            pp = positional.params
-            eq_(
-                [pp[k] for k in positional.positiontup],
-                expected_default_params_list,
-            )
-
-            eq_(
-                nonpositional.construct_params(test_param_dict),
-                expected_test_params_dict,
-            )
-            pp = positional.construct_params(test_param_dict)
-            eq_(
-                [pp[k] for k in positional.positiontup],
-                expected_test_params_list,
-            )
-
-        # check that params() doesn't modify original statement
-        s = select(
-            [table1],
-            or_(
-                table1.c.myid == bindparam("myid"),
-                table2.c.otherid == bindparam("myotherid"),
-            ),
-        )
-        s2 = s.params({"myid": 8, "myotherid": 7})
-        s3 = s2.params({"myid": 9})
-        assert s.compile().params == {"myid": None, "myotherid": None}
-        assert s2.compile().params == {"myid": 8, "myotherid": 7}
-        assert s3.compile().params == {"myid": 9, "myotherid": 7}
-
-        # test using same 'unique' param object twice in one compile
-        s = select([table1.c.myid]).where(table1.c.myid == 12).as_scalar()
-        s2 = select([table1, s], table1.c.myid == s)
-        self.assert_compile(
-            s2,
-            "SELECT mytable.myid, mytable.name, mytable.description, "
-            "(SELECT mytable.myid FROM mytable WHERE mytable.myid = "
-            ":myid_1) AS anon_1 FROM mytable WHERE mytable.myid = "
-            "(SELECT mytable.myid FROM mytable WHERE mytable.myid = :myid_1)",
-        )
-        positional = s2.compile(dialect=sqlite.dialect())
-
-        pp = positional.params
-        assert [pp[k] for k in positional.positiontup] == [12, 12]
-
-        # check that conflicts with "unique" params are caught
-        s = select(
-            [table1],
-            or_(table1.c.myid == 7, table1.c.myid == bindparam("myid_1")),
-        )
-        assert_raises_message(
-            exc.CompileError,
-            "conflicts with unique bind parameter " "of the same name",
-            str,
-            s,
-        )
-
-        s = select(
-            [table1],
-            or_(
-                table1.c.myid == 7,
-                table1.c.myid == 8,
-                table1.c.myid == bindparam("myid_1"),
-            ),
-        )
-        assert_raises_message(
-            exc.CompileError,
-            "conflicts with unique bind parameter " "of the same name",
-            str,
-            s,
-        )
-
-    def _test_binds_no_hash_collision(self):
-        """test that construct_params doesn't corrupt dict
-            due to hash collisions"""
-
-        total_params = 100000
-
-        in_clause = [":in%d" % i for i in range(total_params)]
-        params = dict(("in%d" % i, i) for i in range(total_params))
-        t = text("text clause %s" % ", ".join(in_clause))
-        eq_(len(t.bindparams), total_params)
-        c = t.compile()
-        pp = c.construct_params(params)
-        eq_(len(set(pp)), total_params, "%s %s" % (len(set(pp)), len(pp)))
-        eq_(len(set(pp.values())), total_params)
-
-    def test_bind_as_col(self):
-        t = table("foo", column("id"))
-
-        s = select([t, literal("lala").label("hoho")])
-        self.assert_compile(s, "SELECT foo.id, :param_1 AS hoho FROM foo")
-
-        assert [str(c) for c in s.c] == ["id", "hoho"]
-
-    def test_bind_callable(self):
-        expr = column("x") == bindparam("key", callable_=lambda: 12)
-        self.assert_compile(expr, "x = :key", {"x": 12})
-
-    def test_bind_params_missing(self):
-        assert_raises_message(
-            exc.InvalidRequestError,
-            r"A value is required for bind parameter 'x'",
-            select([table1])
-            .where(
-                and_(
-                    table1.c.myid == bindparam("x", required=True),
-                    table1.c.name == bindparam("y", required=True),
-                )
-            )
-            .compile()
-            .construct_params,
-            params=dict(y=5),
-        )
-
-        assert_raises_message(
-            exc.InvalidRequestError,
-            r"A value is required for bind parameter 'x'",
-            select([table1])
-            .where(table1.c.myid == bindparam("x", required=True))
-            .compile()
-            .construct_params,
-        )
-
-        assert_raises_message(
-            exc.InvalidRequestError,
-            r"A value is required for bind parameter 'x', "
-            "in parameter group 2",
-            select([table1])
-            .where(
-                and_(
-                    table1.c.myid == bindparam("x", required=True),
-                    table1.c.name == bindparam("y", required=True),
-                )
-            )
-            .compile()
-            .construct_params,
-            params=dict(y=5),
-            _group_number=2,
-        )
-
-        assert_raises_message(
-            exc.InvalidRequestError,
-            r"A value is required for bind parameter 'x', "
-            "in parameter group 2",
-            select([table1])
-            .where(table1.c.myid == bindparam("x", required=True))
-            .compile()
-            .construct_params,
-            _group_number=2,
-        )
-
-    def test_tuple(self):
-        self.assert_compile(
-            tuple_(table1.c.myid, table1.c.name).in_([(1, "foo"), (5, "bar")]),
-            "(mytable.myid, mytable.name) IN "
-            "((:param_1, :param_2), (:param_3, :param_4))",
-        )
-
-        dialect = default.DefaultDialect()
-        dialect.tuple_in_values = True
-        self.assert_compile(
-            tuple_(table1.c.myid, table1.c.name).in_([(1, "foo"), (5, "bar")]),
-            "(mytable.myid, mytable.name) IN "
-            "(VALUES (:param_1, :param_2), (:param_3, :param_4))",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            tuple_(table1.c.myid, table1.c.name).in_(
-                [tuple_(table2.c.otherid, table2.c.othername)]
-            ),
-            "(mytable.myid, mytable.name) IN "
-            "((myothertable.otherid, myothertable.othername))",
-        )
-
-        self.assert_compile(
-            tuple_(table1.c.myid, table1.c.name).in_(
-                select([table2.c.otherid, table2.c.othername])
-            ),
-            "(mytable.myid, mytable.name) IN (SELECT "
-            "myothertable.otherid, myothertable.othername FROM myothertable)",
-        )
-
-    def test_expanding_parameter(self):
-        self.assert_compile(
-            tuple_(table1.c.myid, table1.c.name).in_(
-                bindparam("foo", expanding=True)
-            ),
-            "(mytable.myid, mytable.name) IN ([EXPANDING_foo])",
-        )
-
-        dialect = default.DefaultDialect()
-        dialect.tuple_in_values = True
-        self.assert_compile(
-            tuple_(table1.c.myid, table1.c.name).in_(
-                bindparam("foo", expanding=True)
-            ),
-            "(mytable.myid, mytable.name) IN ([EXPANDING_foo])",
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            table1.c.myid.in_(bindparam("foo", expanding=True)),
-            "mytable.myid IN ([EXPANDING_foo])",
         )
 
     def test_cast(self):
@@ -3180,6 +2773,539 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
         assert_raises(exc.ArgumentError, and_, ("a",), ("b",))
 
 
+class BindParameterTest(AssertsCompiledSQL, fixtures.TestBase):
+    __dialect__ = "default"
+
+    def test_binds(self):
+        for (
+            stmt,
+            expected_named_stmt,
+            expected_positional_stmt,
+            expected_default_params_dict,
+            expected_default_params_list,
+            test_param_dict,
+            expected_test_params_dict,
+            expected_test_params_list,
+        ) in [
+            (
+                select(
+                    [table1, table2],
+                    and_(
+                        table1.c.myid == table2.c.otherid,
+                        table1.c.name == bindparam("mytablename"),
+                    ),
+                ),
+                "SELECT mytable.myid, mytable.name, mytable.description, "
+                "myothertable.otherid, myothertable.othername FROM mytable, "
+                "myothertable WHERE mytable.myid = myothertable.otherid "
+                "AND mytable.name = :mytablename",
+                "SELECT mytable.myid, mytable.name, mytable.description, "
+                "myothertable.otherid, myothertable.othername FROM mytable, "
+                "myothertable WHERE mytable.myid = myothertable.otherid AND "
+                "mytable.name = ?",
+                {"mytablename": None},
+                [None],
+                {"mytablename": 5},
+                {"mytablename": 5},
+                [5],
+            ),
+            (
+                select(
+                    [table1],
+                    or_(
+                        table1.c.myid == bindparam("myid"),
+                        table2.c.otherid == bindparam("myid"),
+                    ),
+                ),
+                "SELECT mytable.myid, mytable.name, mytable.description "
+                "FROM mytable, myothertable WHERE mytable.myid = :myid "
+                "OR myothertable.otherid = :myid",
+                "SELECT mytable.myid, mytable.name, mytable.description "
+                "FROM mytable, myothertable WHERE mytable.myid = ? "
+                "OR myothertable.otherid = ?",
+                {"myid": None},
+                [None, None],
+                {"myid": 5},
+                {"myid": 5},
+                [5, 5],
+            ),
+            (
+                text(
+                    "SELECT mytable.myid, mytable.name, "
+                    "mytable.description FROM "
+                    "mytable, myothertable WHERE mytable.myid = :myid OR "
+                    "myothertable.otherid = :myid"
+                ),
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = :myid OR "
+                "myothertable.otherid = :myid",
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = ? OR "
+                "myothertable.otherid = ?",
+                {"myid": None},
+                [None, None],
+                {"myid": 5},
+                {"myid": 5},
+                [5, 5],
+            ),
+            (
+                select(
+                    [table1],
+                    or_(
+                        table1.c.myid == bindparam("myid", unique=True),
+                        table2.c.otherid == bindparam("myid", unique=True),
+                    ),
+                ),
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = "
+                ":myid_1 OR myothertable.otherid = :myid_2",
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = ? "
+                "OR myothertable.otherid = ?",
+                {"myid_1": None, "myid_2": None},
+                [None, None],
+                {"myid_1": 5, "myid_2": 6},
+                {"myid_1": 5, "myid_2": 6},
+                [5, 6],
+            ),
+            (
+                bindparam("test", type_=String, required=False) + text("'hi'"),
+                ":test || 'hi'",
+                "? || 'hi'",
+                {"test": None},
+                [None],
+                {},
+                {"test": None},
+                [None],
+            ),
+            (
+                # testing select.params() here - bindparam() objects
+                # must get required flag set to False
+                select(
+                    [table1],
+                    or_(
+                        table1.c.myid == bindparam("myid"),
+                        table2.c.otherid == bindparam("myotherid"),
+                    ),
+                ).params({"myid": 8, "myotherid": 7}),
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = "
+                ":myid OR myothertable.otherid = :myotherid",
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = "
+                "? OR myothertable.otherid = ?",
+                {"myid": 8, "myotherid": 7},
+                [8, 7],
+                {"myid": 5},
+                {"myid": 5, "myotherid": 7},
+                [5, 7],
+            ),
+            (
+                select(
+                    [table1],
+                    or_(
+                        table1.c.myid
+                        == bindparam("myid", value=7, unique=True),
+                        table2.c.otherid
+                        == bindparam("myid", value=8, unique=True),
+                    ),
+                ),
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = "
+                ":myid_1 OR myothertable.otherid = :myid_2",
+                "SELECT mytable.myid, mytable.name, mytable.description FROM "
+                "mytable, myothertable WHERE mytable.myid = "
+                "? OR myothertable.otherid = ?",
+                {"myid_1": 7, "myid_2": 8},
+                [7, 8],
+                {"myid_1": 5, "myid_2": 6},
+                {"myid_1": 5, "myid_2": 6},
+                [5, 6],
+            ),
+        ]:
+
+            self.assert_compile(
+                stmt, expected_named_stmt, params=expected_default_params_dict
+            )
+            self.assert_compile(
+                stmt, expected_positional_stmt, dialect=sqlite.dialect()
+            )
+            nonpositional = stmt.compile()
+            positional = stmt.compile(dialect=sqlite.dialect())
+            pp = positional.params
+            eq_(
+                [pp[k] for k in positional.positiontup],
+                expected_default_params_list,
+            )
+
+            eq_(
+                nonpositional.construct_params(test_param_dict),
+                expected_test_params_dict,
+            )
+            pp = positional.construct_params(test_param_dict)
+            eq_(
+                [pp[k] for k in positional.positiontup],
+                expected_test_params_list,
+            )
+
+        # check that params() doesn't modify original statement
+        s = select(
+            [table1],
+            or_(
+                table1.c.myid == bindparam("myid"),
+                table2.c.otherid == bindparam("myotherid"),
+            ),
+        )
+        s2 = s.params({"myid": 8, "myotherid": 7})
+        s3 = s2.params({"myid": 9})
+        assert s.compile().params == {"myid": None, "myotherid": None}
+        assert s2.compile().params == {"myid": 8, "myotherid": 7}
+        assert s3.compile().params == {"myid": 9, "myotherid": 7}
+
+        # test using same 'unique' param object twice in one compile
+        s = select([table1.c.myid]).where(table1.c.myid == 12).as_scalar()
+        s2 = select([table1, s], table1.c.myid == s)
+        self.assert_compile(
+            s2,
+            "SELECT mytable.myid, mytable.name, mytable.description, "
+            "(SELECT mytable.myid FROM mytable WHERE mytable.myid = "
+            ":myid_1) AS anon_1 FROM mytable WHERE mytable.myid = "
+            "(SELECT mytable.myid FROM mytable WHERE mytable.myid = :myid_1)",
+        )
+        positional = s2.compile(dialect=sqlite.dialect())
+
+        pp = positional.params
+        assert [pp[k] for k in positional.positiontup] == [12, 12]
+
+        # check that conflicts with "unique" params are caught
+        s = select(
+            [table1],
+            or_(table1.c.myid == 7, table1.c.myid == bindparam("myid_1")),
+        )
+        assert_raises_message(
+            exc.CompileError,
+            "conflicts with unique bind parameter " "of the same name",
+            str,
+            s,
+        )
+
+        s = select(
+            [table1],
+            or_(
+                table1.c.myid == 7,
+                table1.c.myid == 8,
+                table1.c.myid == bindparam("myid_1"),
+            ),
+        )
+        assert_raises_message(
+            exc.CompileError,
+            "conflicts with unique bind parameter " "of the same name",
+            str,
+            s,
+        )
+
+    def _test_binds_no_hash_collision(self):
+        """test that construct_params doesn't corrupt dict
+        due to hash collisions"""
+
+        total_params = 100000
+
+        in_clause = [":in%d" % i for i in range(total_params)]
+        params = dict(("in%d" % i, i) for i in range(total_params))
+        t = text("text clause %s" % ", ".join(in_clause))
+        eq_(len(t.bindparams), total_params)
+        c = t.compile()
+        pp = c.construct_params(params)
+        eq_(len(set(pp)), total_params, "%s %s" % (len(set(pp)), len(pp)))
+        eq_(len(set(pp.values())), total_params)
+
+    def test_bind_anon_name_no_special_chars(self):
+        for paramstyle in "named", "pyformat":
+            dialect = default.DefaultDialect()
+            dialect.paramstyle = paramstyle
+
+            for name, named, pyformat in [
+                ("%(my name)s", ":my_name_s_1", "%(my_name_s_1)s"),
+                ("myname(foo)", ":myname_foo_1", "%(myname_foo_1)s"),
+                (
+                    "this is a name",
+                    ":this_is_a_name_1",
+                    "%(this_is_a_name_1)s",
+                ),
+                ("_leading_one", ":leading_one_1", "%(leading_one_1)s"),
+                ("3leading_two", ":3leading_two_1", "%(3leading_two_1)s"),
+                ("$leading_three", ":leading_three_1", "%(leading_three_1)s"),
+                ("%(tricky", ":tricky_1", "%(tricky_1)s"),
+                ("5(tricky", ":5_tricky_1", "%(5_tricky_1)s"),
+            ]:
+                t = table("t", column(name, String))
+                expr = t.c[name] == "foo"
+
+                self.assert_compile(
+                    expr,
+                    "t.%s = %s"
+                    % (
+                        dialect.identifier_preparer.quote(name),
+                        named if paramstyle == "named" else pyformat,
+                    ),
+                    dialect=dialect,
+                    checkparams={named[1:]: "foo"},
+                )
+
+    def test_bind_anon_name_special_chars_uniqueify_one(self):
+        # test that the chars are escaped before doing the counter,
+        # otherwise these become the same name and bind params will conflict
+        t = table("t", column("_3foo"), column("4%foo"))
+
+        self.assert_compile(
+            (t.c["_3foo"] == "foo") & (t.c["4%foo"] == "bar"),
+            't._3foo = :3foo_1 AND t."4%foo" = :4_foo_1',
+            checkparams={"3foo_1": "foo", "4_foo_1": "bar"},
+        )
+
+    def test_bind_anon_name_special_chars_uniqueify_two(self):
+
+        t = table("t", column("_3foo"), column("4(foo"))
+
+        self.assert_compile(
+            (t.c["_3foo"] == "foo") & (t.c["4(foo"] == "bar"),
+            't._3foo = :3foo_1 AND t."4(foo" = :4_foo_1',
+            checkparams={"3foo_1": "foo", "4_foo_1": "bar"},
+        )
+
+    def test_bind_as_col(self):
+        t = table("foo", column("id"))
+
+        s = select([t, literal("lala").label("hoho")])
+        self.assert_compile(s, "SELECT foo.id, :param_1 AS hoho FROM foo")
+
+        assert [str(c) for c in s.alias().c] == ["anon_1.id", "anon_1.hoho"]
+
+    def test_bind_callable(self):
+        expr = column("x") == bindparam("key", callable_=lambda: 12)
+        self.assert_compile(expr, "x = :key", {"x": 12})
+
+    def test_bind_params_missing(self):
+        assert_raises_message(
+            exc.InvalidRequestError,
+            r"A value is required for bind parameter 'x'",
+            select([table1])
+            .where(
+                and_(
+                    table1.c.myid == bindparam("x", required=True),
+                    table1.c.name == bindparam("y", required=True),
+                )
+            )
+            .compile()
+            .construct_params,
+            params=dict(y=5),
+        )
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            r"A value is required for bind parameter 'x'",
+            select([table1])
+            .where(table1.c.myid == bindparam("x", required=True))
+            .compile()
+            .construct_params,
+        )
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            r"A value is required for bind parameter 'x', "
+            "in parameter group 2",
+            select([table1])
+            .where(
+                and_(
+                    table1.c.myid == bindparam("x", required=True),
+                    table1.c.name == bindparam("y", required=True),
+                )
+            )
+            .compile()
+            .construct_params,
+            params=dict(y=5),
+            _group_number=2,
+        )
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            r"A value is required for bind parameter 'x', "
+            "in parameter group 2",
+            select([table1])
+            .where(table1.c.myid == bindparam("x", required=True))
+            .compile()
+            .construct_params,
+            _group_number=2,
+        )
+
+    def test_tuple(self):
+        self.assert_compile(
+            tuple_(table1.c.myid, table1.c.name).in_([(1, "foo"), (5, "bar")]),
+            "(mytable.myid, mytable.name) IN "
+            "((:param_1, :param_2), (:param_3, :param_4))",
+        )
+
+        dialect = default.DefaultDialect()
+        dialect.tuple_in_values = True
+        self.assert_compile(
+            tuple_(table1.c.myid, table1.c.name).in_([(1, "foo"), (5, "bar")]),
+            "(mytable.myid, mytable.name) IN "
+            "(VALUES (:param_1, :param_2), (:param_3, :param_4))",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            tuple_(table1.c.myid, table1.c.name).in_(
+                [tuple_(table2.c.otherid, table2.c.othername)]
+            ),
+            "(mytable.myid, mytable.name) IN "
+            "((myothertable.otherid, myothertable.othername))",
+        )
+
+        self.assert_compile(
+            tuple_(table1.c.myid, table1.c.name).in_(
+                select([table2.c.otherid, table2.c.othername])
+            ),
+            "(mytable.myid, mytable.name) IN (SELECT "
+            "myothertable.otherid, myothertable.othername FROM myothertable)",
+        )
+
+    def test_expanding_parameter(self):
+        self.assert_compile(
+            tuple_(table1.c.myid, table1.c.name).in_(
+                bindparam("foo", expanding=True)
+            ),
+            "(mytable.myid, mytable.name) IN ([EXPANDING_foo])",
+        )
+
+        dialect = default.DefaultDialect()
+        dialect.tuple_in_values = True
+        self.assert_compile(
+            tuple_(table1.c.myid, table1.c.name).in_(
+                bindparam("foo", expanding=True)
+            ),
+            "(mytable.myid, mytable.name) IN ([EXPANDING_foo])",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            table1.c.myid.in_(bindparam("foo", expanding=True)),
+            "mytable.myid IN ([EXPANDING_foo])",
+        )
+
+    def test_limit_offset_select_literal_binds(self):
+        stmt = select([1]).limit(5).offset(6)
+        self.assert_compile(
+            stmt, "SELECT 1 LIMIT 5 OFFSET 6", literal_binds=True
+        )
+
+    def test_limit_offset_compound_select_literal_binds(self):
+        stmt = select([1]).union(select([2])).limit(5).offset(6)
+        self.assert_compile(
+            stmt,
+            "SELECT 1 UNION SELECT 2 LIMIT 5 OFFSET 6",
+            literal_binds=True,
+        )
+
+    def test_multiple_col_binds(self):
+        self.assert_compile(
+            select(
+                [literal_column("*")],
+                or_(
+                    table1.c.myid == 12,
+                    table1.c.myid == "asdf",
+                    table1.c.myid == "foo",
+                ),
+            ),
+            "SELECT * FROM mytable WHERE mytable.myid = :myid_1 "
+            "OR mytable.myid = :myid_2 OR mytable.myid = :myid_3",
+        )
+
+    def test_render_binds_as_literal(self):
+        """test a compiler that renders binds inline into
+        SQL in the columns clause."""
+
+        dialect = default.DefaultDialect()
+
+        class Compiler(dialect.statement_compiler):
+            ansi_bind_rules = True
+
+        dialect.statement_compiler = Compiler
+
+        self.assert_compile(
+            select([literal("someliteral")]),
+            "SELECT 'someliteral' AS anon_1",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            select([table1.c.myid + 3]),
+            "SELECT mytable.myid + 3 AS anon_1 FROM mytable",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            select([table1.c.myid.in_([4, 5, 6])]),
+            "SELECT mytable.myid IN (4, 5, 6) AS anon_1 FROM mytable",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            select([func.mod(table1.c.myid, 5)]),
+            "SELECT mod(mytable.myid, 5) AS mod_1 FROM mytable",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            select([literal("foo").in_([])]),
+            "SELECT 1 != 1 AS anon_1",
+            dialect=dialect,
+        )
+
+        self.assert_compile(
+            select([literal(util.b("foo"))]),
+            "SELECT 'foo' AS anon_1",
+            dialect=dialect,
+        )
+
+        # test callable
+        self.assert_compile(
+            select([table1.c.myid == bindparam("foo", callable_=lambda: 5)]),
+            "SELECT mytable.myid = 5 AS anon_1 FROM mytable",
+            dialect=dialect,
+        )
+
+        empty_in_dialect = default.DefaultDialect(empty_in_strategy="dynamic")
+        empty_in_dialect.statement_compiler = Compiler
+
+        assert_raises_message(
+            exc.CompileError,
+            "Bind parameter 'foo' without a "
+            "renderable value not allowed here.",
+            bindparam("foo").in_([]).compile,
+            dialect=empty_in_dialect,
+        )
+
+    def test_render_expanding_parameter(self):
+        self.assert_compile(
+            select([table1.c.myid]).where(
+                table1.c.myid.in_(bindparam("foo", expanding=True))
+            ),
+            "SELECT mytable.myid FROM mytable "
+            "WHERE mytable.myid IN ([EXPANDING_foo])",
+        )
+
+    def test_render_expanding_parameter_literal_binds(self):
+        self.assert_compile(
+            select([table1.c.myid]).where(
+                table1.c.myid.in_(bindparam("foo", [1, 2, 3], expanding=True))
+            ),
+            "SELECT mytable.myid FROM mytable "
+            "WHERE mytable.myid IN [1, 2, 3]",
+            literal_binds=True,
+        )
+
+
 class UnsupportedTest(fixtures.TestBase):
     def test_unsupported_element_str_visit_name(self):
         from sqlalchemy.sql.expression import ClauseElement
@@ -3297,6 +3423,56 @@ class StringifySpecialTest(fixtures.TestBase):
             str(stmt),
             "SELECT mytable.myid, percentile_cont(:percentile_cont_1) "
             "WITHIN GROUP (ORDER BY mytable.name DESC) AS anon_1 FROM mytable",
+        )
+
+    @testing.combinations(
+        ("datetime", datetime.datetime.now()),
+        ("date", datetime.date.today()),
+        ("time", datetime.time()),
+        argnames="value",
+        id_="ia",
+    )
+    def test_render_datetime(self, value):
+        lit = literal(value)
+
+        eq_ignore_whitespace(
+            str(lit.compile(compile_kwargs={"literal_binds": True})),
+            "'%s'" % value,
+        )
+
+    def test_with_hint_table(self):
+        stmt = (
+            select([table1])
+            .select_from(
+                table1.join(table2, table1.c.myid == table2.c.otherid)
+            )
+            .with_hint(table1, "use some_hint")
+        )
+
+        # note that some dialects instead use the "with_select_hint"
+        # hook to put the 'hint' up front
+        eq_ignore_whitespace(
+            str(stmt),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable [use some_hint] "
+            "JOIN myothertable ON mytable.myid = myothertable.otherid",
+        )
+
+    def test_with_hint_statement(self):
+        stmt = (
+            select([table1])
+            .select_from(
+                table1.join(table2, table1.c.myid == table2.c.otherid)
+            )
+            .with_statement_hint("use some_hint")
+        )
+
+        eq_ignore_whitespace(
+            str(stmt),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable "
+            "JOIN myothertable ON mytable.myid = myothertable.otherid "
+            "use some_hint",
         )
 
 
@@ -3544,15 +3720,92 @@ class DDLTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         self.assert_compile(
+            s1.next_value(),
+            "<next sequence value: z.s1>",
+            schema_translate_map=schema_translate_map,
+            dialect="default_enhanced",
+        )
+
+        self.assert_compile(
             schema.CreateSequence(s2),
             "CREATE SEQUENCE bat.s2",
             schema_translate_map=schema_translate_map,
         )
 
         self.assert_compile(
+            s2.next_value(),
+            "<next sequence value: bat.s2>",
+            schema_translate_map=schema_translate_map,
+            dialect="default_enhanced",
+        )
+
+        self.assert_compile(
             schema.CreateSequence(s3),
             "CREATE SEQUENCE s3",
             schema_translate_map=schema_translate_map,
+        )
+
+        self.assert_compile(
+            s3.next_value(),
+            "<next sequence value: s3>",
+            schema_translate_map=schema_translate_map,
+            dialect="default_enhanced",
+        )
+
+    def test_schema_translate_map_sequence_server_default(self):
+        s1 = schema.Sequence("s1")
+        s2 = schema.Sequence("s2", schema="foo")
+        s3 = schema.Sequence("s3", schema="bar")
+
+        schema_translate_map = {None: "z", "bar": None, "foo": "bat"}
+
+        m = MetaData()
+
+        t1 = Table(
+            "t1",
+            m,
+            Column(
+                "id", Integer, server_default=s1.next_value(), primary_key=True
+            ),
+        )
+        t2 = Table(
+            "t2",
+            m,
+            Column(
+                "id", Integer, server_default=s2.next_value(), primary_key=True
+            ),
+        )
+        t3 = Table(
+            "t3",
+            m,
+            Column(
+                "id", Integer, server_default=s3.next_value(), primary_key=True
+            ),
+        )
+
+        self.assert_compile(
+            schema.CreateTable(t1),
+            "CREATE TABLE z.t1 "
+            "(id INTEGER DEFAULT <next sequence value: z.s1> "
+            "NOT NULL, PRIMARY KEY (id))",
+            schema_translate_map=schema_translate_map,
+            dialect="default_enhanced",
+        )
+        self.assert_compile(
+            schema.CreateTable(t2),
+            "CREATE TABLE z.t2 "
+            "(id INTEGER DEFAULT <next sequence value: bat.s2> "
+            "NOT NULL, PRIMARY KEY (id))",
+            schema_translate_map=schema_translate_map,
+            dialect="default_enhanced",
+        )
+        self.assert_compile(
+            schema.CreateTable(t3),
+            "CREATE TABLE z.t3 "
+            "(id INTEGER DEFAULT <next sequence value: s3> "
+            "NOT NULL, PRIMARY KEY (id))",
+            schema_translate_map=schema_translate_map,
+            dialect="default_enhanced",
         )
 
     def test_fk_render(self):
@@ -3826,6 +4079,79 @@ class SchemaTest(fixtures.TestBase, AssertsCompiledSQL):
             "INSERT INTO remote_owner.remotetable "
             "(rem_id, datatype_id, value) VALUES "
             "(:rem_id, :datatype_id, :value)",
+        )
+
+    def test_schema_lowercase_select(self):
+        # test that "schema" works correctly when passed to table
+        t1 = table("foo", column("a"), column("b"), schema="bar")
+        self.assert_compile(
+            select([t1]).select_from(t1),
+            "SELECT bar.foo.a, bar.foo.b FROM bar.foo",
+        )
+
+    def test_schema_lowercase_select_alias(self):
+        # test alias behavior
+        t1 = table("foo", schema="bar")
+        self.assert_compile(
+            select(["*"]).select_from(t1.alias("t")),
+            "SELECT * FROM bar.foo AS t",
+        )
+
+    def test_schema_lowercase_select_labels(self):
+        # test "schema" with extended_labels
+        t1 = table(
+            "baz",
+            column("id", Integer),
+            column("name", String),
+            column("meta", String),
+            schema="here",
+        )
+
+        self.assert_compile(
+            select([t1]).select_from(t1).apply_labels(),
+            "SELECT here.baz.id AS here_baz_id, here.baz.name AS "
+            "here_baz_name, here.baz.meta AS here_baz_meta FROM here.baz",
+        )
+
+    def test_schema_lowercase_select_subquery(self):
+        # test schema plays well with subqueries
+        t1 = table(
+            "yetagain",
+            column("anotherid", Integer),
+            column("anothername", String),
+            schema="here",
+        )
+        s = (
+            text("select id, name from user")
+            .columns(id=Integer, name=String)
+            .alias()
+        )
+        stmt = select([t1.c.anotherid]).select_from(
+            t1.join(s, t1.c.anotherid == s.c.id)
+        )
+        compiled = stmt.compile()
+        eq_(
+            compiled._create_result_map(),
+            {
+                "anotherid": (
+                    "anotherid",
+                    (
+                        t1.c.anotherid,
+                        "anotherid",
+                        "anotherid",
+                    ),
+                    t1.c.anotherid.type,
+                )
+            },
+        )
+
+    def test_schema_lowercase_invalid(self):
+        assert_raises_message(
+            exc.ArgumentError,
+            r"Unsupported argument\(s\): \['not_a_schema'\]",
+            table,
+            "foo",
+            not_a_schema="bar",
         )
 
 

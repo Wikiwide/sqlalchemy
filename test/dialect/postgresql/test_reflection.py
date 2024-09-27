@@ -32,6 +32,7 @@ from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertions import assert_raises
 from sqlalchemy.testing.assertions import AssertsExecutionResults
 from sqlalchemy.testing.assertions import eq_
+from sqlalchemy.testing.assertions import is_
 
 
 class ForeignTableReflectionTest(fixtures.TablesTest, AssertsExecutionResults):
@@ -232,6 +233,17 @@ class MaterializedViewReflectionTest(
             set(["test_mview"]),
         )
 
+    def test_get_view_names_reflection_cache_ok(self):
+        insp = inspect(testing.db)
+        eq_(
+            set(insp.get_view_names(include=("plain",))), set(["test_regview"])
+        )
+        eq_(
+            set(insp.get_view_names(include=("materialized",))),
+            set(["test_mview"]),
+        )
+        eq_(set(insp.get_view_names()), set(["test_regview", "test_mview"]))
+
     def test_get_view_names_empty(self):
         insp = inspect(testing.db)
         assert_raises(ValueError, insp.get_view_names, include=())
@@ -265,6 +277,9 @@ class DomainReflectionTest(fixtures.TestBase, AssertsExecutionResults):
             "CREATE DOMAIN enumdomain AS testtype",
             "CREATE DOMAIN arraydomain AS INTEGER[]",
             'CREATE DOMAIN "SomeSchema"."Quoted.Domain" INTEGER DEFAULT 0',
+            "CREATE DOMAIN nullable_domain AS TEXT CHECK "
+            "(VALUE IN('FOO', 'BAR'))",
+            "CREATE DOMAIN not_nullable_domain AS TEXT NOT NULL",
         ]:
             try:
                 con.execute(ddl)
@@ -292,6 +307,11 @@ class DomainReflectionTest(fixtures.TestBase, AssertsExecutionResults):
             "CREATE TABLE quote_test "
             '(id integer, data "SomeSchema"."Quoted.Domain")'
         )
+        con.execute(
+            "CREATE TABLE nullable_domain_test "
+            "(not_nullable_domain_col nullable_domain not null,"
+            "nullable_local not_nullable_domain)"
+        )
 
     @classmethod
     def teardown_class(cls):
@@ -309,6 +329,10 @@ class DomainReflectionTest(fixtures.TestBase, AssertsExecutionResults):
         con.execute("DROP DOMAIN arraydomain")
         con.execute('DROP DOMAIN "SomeSchema"."Quoted.Domain"')
         con.execute('DROP SCHEMA "SomeSchema"')
+
+        con.execute("DROP TABLE nullable_domain_test")
+        con.execute("DROP DOMAIN nullable_domain")
+        con.execute("DROP DOMAIN not_nullable_domain")
 
     def test_table_is_reflected(self):
         metadata = MetaData(testing.db)
@@ -331,6 +355,12 @@ class DomainReflectionTest(fixtures.TestBase, AssertsExecutionResults):
         assert (
             not table.columns.answer.nullable
         ), "Expected reflected column to not be nullable."
+
+    def test_nullable_from_domain(self):
+        metadata = MetaData(testing.db)
+        table = Table("nullable_domain_test", metadata, autoload=True)
+        is_(table.c.not_nullable_domain_col.nullable, False)
+        is_(table.c.nullable_local.nullable, False)
 
     def test_enum_domain_is_reflected(self):
         metadata = MetaData(testing.db)
@@ -866,8 +896,7 @@ class ReflectionTest(fixtures.TestBase):
 
     @testing.provide_metadata
     def test_index_reflection(self):
-        """ Reflecting partial & expression-based indexes should warn
-        """
+        """Reflecting partial & expression-based indexes should warn"""
 
         metadata = self.metadata
 
@@ -1098,6 +1127,38 @@ class ReflectionTest(fixtures.TestBase):
             eq_(
                 list(t1.indexes)[0].dialect_options["postgresql"]["using"],
                 "gin",
+            )
+
+    @testing.skip_if("postgresql < 11.0", "indnkeyatts not supported")
+    @testing.provide_metadata
+    def test_index_reflection_with_include(self):
+        """reflect indexes with include set"""
+
+        metadata = self.metadata
+
+        Table(
+            "t",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("x", ARRAY(Integer)),
+            Column("name", String(20)),
+        )
+        metadata.create_all()
+        with testing.db.connect() as conn:
+            conn.execute("CREATE INDEX idx1 ON t (x) INCLUDE (name)")
+
+            # prior to #5205, this would return:
+            # [{'column_names': ['x', 'name'],
+            #  'name': 'idx1', 'unique': False}]
+
+            with testing.expect_warnings(
+                "INCLUDE columns for "
+                "covering index idx1 ignored during reflection"
+            ):
+                ind = testing.db.dialect.get_indexes(conn, "t", None)
+            eq_(
+                ind,
+                [{"unique": False, "column_names": ["x"], "name": "idx1"}],
             )
 
     @testing.provide_metadata
@@ -1519,17 +1580,36 @@ class ReflectionTest(fixtures.TestBase):
     def test_reflect_check_constraint(self):
         meta = self.metadata
 
-        cc_table = Table(
+        udf_create = """\
+            CREATE OR REPLACE FUNCTION is_positive(
+                x integer DEFAULT '-1'::integer)
+                RETURNS boolean
+                LANGUAGE 'plpgsql'
+                COST 100
+                VOLATILE
+            AS $BODY$BEGIN
+                RETURN x > 0;
+            END;$BODY$;
+        """
+        sa.event.listen(meta, "before_create", sa.DDL(udf_create))
+        sa.event.listen(
+            meta, "after_drop", sa.DDL("DROP FUNCTION is_positive(integer)")
+        )
+
+        Table(
             "pgsql_cc",
             meta,
             Column("a", Integer()),
+            Column("b", String),
             CheckConstraint("a > 1 AND a < 5", name="cc1"),
             CheckConstraint("a = 1 OR (a > 2 AND a < 5)", name="cc2"),
+            CheckConstraint("is_positive(a)", name="cc3"),
+            CheckConstraint("b != 'hi\nim a name   \nyup\n'", name="cc4"),
         )
 
-        cc_table.create()
+        meta.create_all()
 
-        reflected = Table("pgsql_cc", MetaData(testing.db), autoload=True)
+        reflected = Table("pgsql_cc", MetaData(), autoload_with=testing.db)
 
         check_constraints = dict(
             (uc.name, uc.sqltext.text)
@@ -1542,13 +1622,16 @@ class ReflectionTest(fixtures.TestBase):
             {
                 u"cc1": u"(a > 1) AND (a < 5)",
                 u"cc2": u"(a = 1) OR ((a > 2) AND (a < 5))",
+                u"cc3": u"is_positive(a)",
+                u"cc4": u"(b)::text <> 'hi\nim a name   \nyup\n'::text",
             },
         )
 
     def test_reflect_check_warning(self):
+        rows = [("some name", "NOTCHECK foobar")]
         conn = mock.Mock(
-            execute=lambda *arg, **kw: mock.Mock(
-                fetchall=lambda: [("some name", "NOTCHECK foobar")]
+            execute=lambda *arg, **kw: mock.MagicMock(
+                fetchall=lambda: rows, __iter__=lambda self: iter(rows)
             )
         )
         with mock.patch.object(
@@ -1558,6 +1641,64 @@ class ReflectionTest(fixtures.TestBase):
                 "Could not parse CHECK constraint text: 'NOTCHECK foobar'"
             ):
                 testing.db.dialect.get_check_constraints(conn, "foo")
+
+    def test_reflect_extra_newlines(self):
+        rows = [
+            ("some name", "CHECK (\n(a \nIS\n NOT\n\n NULL\n)\n)"),
+            ("some other name", "CHECK ((b\nIS\nNOT\nNULL))"),
+            ("some CRLF name", "CHECK ((c\r\n\r\nIS\r\nNOT\r\nNULL))"),
+            ("some name", "CHECK (c != 'hi\nim a name\n')"),
+        ]
+        conn = mock.Mock(
+            execute=lambda *arg, **kw: mock.MagicMock(
+                fetchall=lambda: rows, __iter__=lambda self: iter(rows)
+            )
+        )
+        with mock.patch.object(
+            testing.db.dialect, "get_table_oid", lambda *arg, **kw: 1
+        ):
+            check_constraints = testing.db.dialect.get_check_constraints(
+                conn, "foo"
+            )
+            eq_(
+                check_constraints,
+                [
+                    {
+                        "name": "some name",
+                        "sqltext": "a \nIS\n NOT\n\n NULL\n",
+                    },
+                    {"name": "some other name", "sqltext": "b\nIS\nNOT\nNULL"},
+                    {
+                        "name": "some CRLF name",
+                        "sqltext": "c\r\n\r\nIS\r\nNOT\r\nNULL",
+                    },
+                    {"name": "some name", "sqltext": "c != 'hi\nim a name\n'"},
+                ],
+            )
+
+    def test_reflect_with_not_valid_check_constraint(self):
+        rows = [("some name", "CHECK ((a IS NOT NULL)) NOT VALID")]
+        conn = mock.Mock(
+            execute=lambda *arg, **kw: mock.MagicMock(
+                fetchall=lambda: rows, __iter__=lambda self: iter(rows)
+            )
+        )
+        with mock.patch.object(
+            testing.db.dialect, "get_table_oid", lambda *arg, **kw: 1
+        ):
+            check_constraints = testing.db.dialect.get_check_constraints(
+                conn, "foo"
+            )
+            eq_(
+                check_constraints,
+                [
+                    {
+                        "name": "some name",
+                        "sqltext": "a IS NOT NULL",
+                        "dialect_options": {"not_valid": True},
+                    }
+                ],
+            )
 
 
 class CustomTypeReflectionTest(fixtures.TestBase):
@@ -1585,7 +1726,7 @@ class CustomTypeReflectionTest(fixtures.TestBase):
             ("my_custom_type(ARG1, ARG2)", ("ARG1", "ARG2")),
         ]:
             column_info = dialect._get_column_info(
-                "colname", sch, None, False, {}, {}, "public", None
+                "colname", sch, None, False, {}, {}, "public", None, ""
             )
             assert isinstance(column_info["type"], self.CustomType)
             eq_(column_info["type"].arg1, args[0])

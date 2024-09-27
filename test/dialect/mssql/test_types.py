@@ -36,10 +36,12 @@ from sqlalchemy.databases import mssql
 from sqlalchemy.dialects.mssql import ROWVERSION
 from sqlalchemy.dialects.mssql import TIMESTAMP
 from sqlalchemy.dialects.mssql.base import _MSDate
+from sqlalchemy.dialects.mssql.base import DATETIMEOFFSET
 from sqlalchemy.dialects.mssql.base import MS_2005_VERSION
 from sqlalchemy.dialects.mssql.base import MS_2008_VERSION
 from sqlalchemy.dialects.mssql.base import TIME
 from sqlalchemy.sql import sqltypes
+from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
@@ -49,9 +51,55 @@ from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import pickleable
 from sqlalchemy.util import b
+
+
+class TimeParameterTest(fixtures.TablesTest):
+    __only_on__ = "mssql"
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "time_t",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("time_col", Time),
+        )
+
+    @classmethod
+    def insert_data(cls, connection):
+        time_t = cls.tables.time_t
+        connection.execute(
+            time_t.insert(),
+            [
+                {"id": 1, "time_col": datetime.time(1, 23, 45, 67)},
+                {"id": 2, "time_col": datetime.time(12, 0, 0)},
+                {"id": 3, "time_col": datetime.time(16, 19, 59, 999999)},
+                {"id": 4, "time_col": None},
+            ],
+        )
+
+    @testing.combinations(
+        ("not_null", datetime.time(1, 23, 45, 68), 2),
+        ("null", None, 1),
+        id_="iaa",
+        argnames="time_value, expected_row_count",
+    )
+    def test_time_as_parameter_to_where(
+        self, time_value, expected_row_count, connection
+    ):
+        # issue #5339
+        t = self.tables.time_t
+
+        if time_value is None:
+            qry = t.select().where(t.c.time_col.is_(time_value))
+        else:
+            qry = t.select().where(t.c.time_col >= time_value)
+        result = connection.execute(qry).fetchall()
+        eq_(len(result), expected_row_count)
 
 
 class TimeTypeTest(fixtures.TestBase):
@@ -708,48 +756,162 @@ class TypeRoundTripTest(
         for col in reflected_dates.c:
             self.assert_types_base(col, dates_table.c[col.key])
 
-    def test_date_roundtrip(self):
+    @testing.metadata_fixture()
+    def date_fixture(self, metadata):
         t = Table(
             "test_dates",
             metadata,
-            Column(
-                "id",
-                Integer,
-                Sequence("datetest_id_seq", optional=True),
-                primary_key=True,
-            ),
             Column("adate", Date),
-            Column("atime", Time),
+            Column("atime1", Time),
+            Column("atime2", Time),
             Column("adatetime", DateTime),
+            Column("adatetimeoffset", DATETIMEOFFSET),
         )
-        metadata.create_all()
+
         d1 = datetime.date(2007, 10, 30)
         t1 = datetime.time(11, 2, 32)
         d2 = datetime.datetime(2007, 10, 30, 11, 2, 32)
-        t.insert().execute(adate=d1, adatetime=d2, atime=t1)
+        return t, (d1, t1, d2)
 
-        # NOTE: this previously passed 'd2' for "adate" even though
-        # "adate" is a date column; we asserted that it truncated w/o issue.
-        # As of pyodbc 4.0.22, this is no longer accepted, was accepted
-        # in 4.0.21.  See also the new pyodbc assertions regarding numeric
-        # precision.
-        t.insert().execute(adate=d1, adatetime=d2, atime=d2)
+    def test_date_roundtrips(self, date_fixture):
+        t, (d1, t1, d2) = date_fixture
+        with testing.db.begin() as conn:
+            conn.execute(
+                t.insert(), adate=d1, adatetime=d2, atime1=t1, atime2=d2
+            )
 
-        x = t.select().execute().fetchall()[0]
-        self.assert_(x.adate.__class__ == datetime.date)
-        self.assert_(x.atime.__class__ == datetime.time)
-        self.assert_(x.adatetime.__class__ == datetime.datetime)
+            row = conn.execute(t.select()).first()
+            eq_(
+                (row.adate, row.adatetime, row.atime1, row.atime2),
+                (d1, d2, t1, d2.time()),
+            )
 
-        t.delete().execute()
-
-        t.insert().execute(adate=d1, adatetime=d2, atime=t1)
-
-        eq_(
-            select([t.c.adate, t.c.atime, t.c.adatetime], t.c.adate == d1)
-            .execute()
-            .fetchall(),
-            [(d1, t1, d2)],
+    @testing.metadata_fixture()
+    def datetimeoffset_fixture(self, metadata):
+        t = Table(
+            "test_dates",
+            metadata,
+            Column("adatetimeoffset", DATETIMEOFFSET),
         )
+
+        return t
+
+    @testing.combinations(
+        ("dto_param_none", lambda: None, None, False),
+        (
+            "dto_param_datetime_aware_positive",
+            lambda: datetime.datetime(
+                2007,
+                10,
+                30,
+                11,
+                2,
+                32,
+                123456,
+                util.timezone(datetime.timedelta(hours=1)),
+            ),
+            1,
+            False,
+        ),
+        (
+            "dto_param_datetime_aware_negative",
+            lambda: datetime.datetime(
+                2007,
+                10,
+                30,
+                11,
+                2,
+                32,
+                123456,
+                util.timezone(datetime.timedelta(hours=-5)),
+            ),
+            -5,
+            False,
+        ),
+        (
+            "dto_param_datetime_aware_seconds_frac_fail",
+            lambda: datetime.datetime(
+                2007,
+                10,
+                30,
+                11,
+                2,
+                32,
+                123456,
+                util.timezone(datetime.timedelta(seconds=4000)),
+            ),
+            None,
+            True,
+            testing.requires.python37,
+        ),
+        (
+            "dto_param_datetime_naive",
+            lambda: datetime.datetime(2007, 10, 30, 11, 2, 32, 123456),
+            0,
+            False,
+        ),
+        (
+            "dto_param_string_one",
+            lambda: "2007-10-30 11:02:32.123456 +01:00",
+            1,
+            False,
+        ),
+        # wow
+        (
+            "dto_param_string_two",
+            lambda: "October 30, 2007 11:02:32.123456",
+            0,
+            False,
+        ),
+        ("dto_param_string_invalid", lambda: "this is not a date", 0, True),
+        id_="iaaa",
+        argnames="dto_param_value, expected_offset_hours, should_fail",
+    )
+    def test_datetime_offset(
+        self,
+        datetimeoffset_fixture,
+        dto_param_value,
+        expected_offset_hours,
+        should_fail,
+    ):
+        t = datetimeoffset_fixture
+        dto_param_value = dto_param_value()
+
+        with testing.db.begin() as conn:
+            if should_fail:
+                assert_raises(
+                    sa.exc.DBAPIError,
+                    conn.execute,
+                    t.insert(),
+                    adatetimeoffset=dto_param_value,
+                )
+                return
+
+            conn.execute(
+                t.insert(),
+                adatetimeoffset=dto_param_value,
+            )
+
+            row = conn.execute(t.select()).first()
+
+            if dto_param_value is None:
+                is_(row.adatetimeoffset, None)
+            else:
+                eq_(
+                    row.adatetimeoffset,
+                    datetime.datetime(
+                        2007,
+                        10,
+                        30,
+                        11,
+                        2,
+                        32,
+                        123456,
+                        util.timezone(
+                            datetime.timedelta(hours=expected_offset_hours)
+                        ),
+                    ),
+                )
 
     @emits_warning_on("mssql+mxodbc", r".*does not have any indexes.*")
     @testing.provide_metadata
@@ -892,7 +1054,7 @@ class TypeRoundTripTest(
                     is_(tbl._autoincrement_column, col)
                 else:
                     eq_(col.autoincrement, "auto")
-                    is_not_(tbl._autoincrement_column, col)
+                    is_not(tbl._autoincrement_column, col)
 
             # mxodbc can't handle scope_identity() with DEFAULT VALUES
 
@@ -913,18 +1075,24 @@ class TypeRoundTripTest(
                 ]
 
             for counter, engine in enumerate(eng):
-                engine.execute(tbl.insert())
-                if "int_y" in tbl.c:
-                    assert engine.scalar(select([tbl.c.int_y])) == counter + 1
-                    assert (
-                        list(engine.execute(tbl.select()).first()).count(
-                            counter + 1
+                with engine.begin() as conn:
+                    conn.execute(tbl.insert())
+                    if "int_y" in tbl.c:
+                        eq_(
+                            conn.execute(select([tbl.c.int_y])).scalar(),
+                            counter + 1,
                         )
-                        == 1
-                    )
-                else:
-                    assert 1 not in list(engine.execute(tbl.select()).first())
-                engine.execute(tbl.delete())
+                        assert (
+                            list(conn.execute(tbl.select()).first()).count(
+                                counter + 1
+                            )
+                            == 1
+                        )
+                    else:
+                        assert 1 not in list(
+                            conn.execute(tbl.select()).first()
+                        )
+                    conn.execute(tbl.delete())
 
 
 class StringTest(fixtures.TestBase, AssertsCompiledSQL):

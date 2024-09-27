@@ -81,7 +81,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         mapper(Order, o)
 
     def test_bulk_save_return_defaults(self):
-        User, = self.classes("User")
+        (User,) = self.classes("User")
 
         s = Session()
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
@@ -104,7 +104,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         eq_(objects[0].__dict__["id"], 1)
 
     def test_bulk_save_mappings_preserve_order(self):
-        User, = self.classes("User")
+        (User,) = self.classes("User")
 
         s = Session()
 
@@ -160,7 +160,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
             )
 
     def test_bulk_save_no_defaults(self):
-        User, = self.classes("User")
+        (User,) = self.classes("User")
 
         s = Session()
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
@@ -178,7 +178,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         assert "id" not in objects[0].__dict__
 
     def test_bulk_save_updated_include_unchanged(self):
-        User, = self.classes("User")
+        (User,) = self.classes("User")
 
         s = Session(expire_on_commit=False)
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
@@ -204,7 +204,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         )
 
     def test_bulk_update(self):
-        User, = self.classes("User")
+        (User,) = self.classes("User")
 
         s = Session(expire_on_commit=False)
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
@@ -234,7 +234,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         )
 
     def test_bulk_insert(self):
-        User, = self.classes("User")
+        (User,) = self.classes("User")
 
         s = Session()
         with self.sql_execution_asserter() as asserter:
@@ -259,7 +259,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         )
 
     def test_bulk_insert_render_nulls(self):
-        Order, = self.classes("Order")
+        (Order,) = self.classes("Order")
 
         s = Session()
         with self.sql_execution_asserter() as asserter:
@@ -436,8 +436,15 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             )
         )
 
-    def test_update_keys(self):
-        asserter = self._test_update(self.classes.PersonKeys)
+    @testing.combinations(
+        ("states",),
+        ("dicts",),
+    )
+    def test_update_keys(self, type_):
+        if type_ == "states":
+            asserter = self._test_update_states(self.classes.PersonKeys)
+        else:
+            asserter = self._test_update(self.classes.PersonKeys)
         asserter.assert_(
             CompiledSQL(
                 "UPDATE people_keys SET name=:personname "
@@ -446,9 +453,16 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             )
         )
 
+    @testing.combinations(
+        ("states",),
+        ("dicts",),
+    )
     @testing.requires.updateable_autoincrement_pks
-    def test_update_attrs(self):
-        asserter = self._test_update(self.classes.PersonAttrs)
+    def test_update_attrs(self, type_):
+        if type_ == "states":
+            asserter = self._test_update_states(self.classes.PersonAttrs)
+        else:
+            asserter = self._test_update(self.classes.PersonAttrs)
         asserter.assert_(
             CompiledSQL(
                 "UPDATE people_attrs SET name=:name "
@@ -494,6 +508,22 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             s.bulk_update_mappings(
                 Person, [{"id": 5, "personname": "newname"}]
             )
+
+        eq_(s.query(Person).first(), Person(id=5, personname="newname"))
+
+        return asserter
+
+    def _test_update_states(self, person_cls):
+        Person = person_cls
+
+        s = Session()
+        s.add(Person(id=5, personname="thename"))
+        s.commit()
+
+        p = s.query(Person).get(5)
+        with self.sql_execution_asserter(testing.db) as asserter:
+            p.personname = "newname"
+            s.bulk_save_objects([p])
 
         eq_(s.query(Person).first(), Person(id=5, personname="newname"))
 

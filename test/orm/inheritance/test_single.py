@@ -568,8 +568,7 @@ class RelationshipFromSingleTest(
             "employee.id AS employee_id FROM employee "
             "WHERE employee.type IN (:type_1)) AS anon_1 "
             "JOIN employee_stuff ON anon_1.employee_id "
-            "= employee_stuff.employee_id ORDER BY "
-            "anon_1.employee_id",
+            "= employee_stuff.employee_id",
             use_default_dialect=True,
         )
 
@@ -1260,11 +1259,11 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Parent = cls.classes.Parent
         SubChild1 = cls.classes.SubChild1
         SubChild2 = cls.classes.SubChild2
-        s = Session()
+        s = Session(connection)
         s.add_all(
             [
                 Parent(

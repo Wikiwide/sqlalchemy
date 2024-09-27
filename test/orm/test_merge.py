@@ -29,7 +29,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
-from sqlalchemy.testing import not_in_
+from sqlalchemy.testing import not_in
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.util import OrderedSet
@@ -770,7 +770,7 @@ class MergeTest(_fixtures.FixtureTest):
 
     def test_no_relationship_cascade(self):
         """test that merge doesn't interfere with a relationship()
-           target that specifically doesn't include 'merge' cascade.
+        target that specifically doesn't include 'merge' cascade.
         """
 
         Address, addresses, users, User = (
@@ -1662,9 +1662,9 @@ class M2ONoUseGetLoadingTest(fixtures.MappedTest):
         assert Address.user.property._use_get is False
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         User, Address = cls.classes.User, cls.classes.Address
-        s = Session()
+        s = Session(connection)
         s.add_all(
             [
                 User(
@@ -1806,7 +1806,7 @@ class DeferredMergeTest(fixtures.MappedTest):
 
             # should not emit load for deferred 'excerpt'
             eq_(b2.summary, "some summary")
-            not_in_("excerpt", b2.__dict__)
+            not_in("excerpt", b2.__dict__)
 
             # now it should emit load for deferred 'excerpt'
             eq_(b2.excerpt, "some excerpt")
@@ -1852,7 +1852,7 @@ class DeferredMergeTest(fixtures.MappedTest):
 
             # should not emit load for deferred 'excerpt'
             eq_(b2.summary, "some summary")
-            not_in_("excerpt", b2.__dict__)
+            not_in("excerpt", b2.__dict__)
 
             # now it should emit load for deferred 'excerpt'
             eq_(b2.excerpt, "some excerpt")

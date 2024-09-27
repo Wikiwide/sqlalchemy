@@ -59,7 +59,9 @@ Above, an additional column ``type`` is established to act as the
 **discriminator**, configured as such using the :paramref:`.mapper.polymorphic_on`
 parameter.  This column will store a value which indicates the type of object
 represented within the row. The column may be of any datatype, though string
-and integer are the most common.
+and integer are the most common.  The actual data value to be applied to this
+column for a particular row in the database is specified using the
+:paramref:`.mapper.polymorphic_identity` parameter, described below.
 
 While a polymorphic discriminator expression is not strictly necessary, it is
 required if polymorphic loading is desired.   Establishing a simple column on
@@ -97,11 +99,34 @@ columns), as well as a foreign key reference to the parent table::
             'polymorphic_identity':'manager',
         }
 
-It is most common that the foreign key constraint is established on the same
-column or columns as the primary key itself, however this is not required; a
-column distinct from the primary key may also be made to refer to the parent
-via foreign key.  The way that a JOIN is constructed from the base table to
-subclasses is also directly customizable, however this is rarely necessary.
+In the above example, each mapping specifies the
+:paramref:`.mapper.polymorphic_identity` parameter within its mapper arguments.
+This value populates the column designated by the
+:paramref:`.mapper.polymorphic_on` parameter established on the base  mapper.
+The :paramref:`.mapper.polymorphic_identity`  parameter should be unique to
+each mapped class across the whole hierarchy, and there should only be one
+"identity" per mapped class; as noted above,  "cascading" identities where some
+subclasses introduce a second identity are not supported.
+
+The ORM uses the value set up by :paramref:`.mapper.polymorphic_identity` in
+order to determine which class a row belongs towards when loading rows
+polymorphically.  In the example above, every row which represents an
+``Employee`` will have the value ``'employee'`` in its ``type`` row; similarly,
+every ``Engineer`` will get the value ``'engineer'``, and each ``Manager`` will
+get the value ``'manager'``. Regardless of whether the inheritance mapping uses
+distinct joined tables for subclasses as in joined table inheritance, or all
+one table as in single table inheritance, this value is expected to be
+persisted and available to the ORM when querying. The
+:paramref:`.mapper.polymorphic_identity` parameter also applies to concrete
+table inheritance, but is not actually persisted; see the later section at
+:ref:`concrete_inheritance` for details.
+
+In a polymorphic setup, it is most common that the foreign key constraint is
+established on the same column or columns as the primary key itself, however
+this is not required; a column distinct from the primary key may also be made
+to refer to the parent via foreign key.  The way that a JOIN is constructed
+from the base table to subclasses is also directly customizable, however this
+is rarely necessary.
 
 .. topic:: Joined inheritance primary keys
 
@@ -233,9 +258,9 @@ discriminator column is also required on the base table so that classes can be
 differentiated from each other.
 
 Even though subclasses share the base table for all of their attributes,
-when using Declarative,  :class:`.Column` objects may still be specified on
+when using Declarative,  :class:`_schema.Column` objects may still be specified on
 subclasses, indicating that the column is to be mapped only to that subclass;
-the :class:`.Column` will be applied to the same base :class:`.Table` object::
+the :class:`_schema.Column` will be applied to the same base :class:`_schema.Table` object::
 
     class Employee(Base):
         __tablename__ = 'employee'
@@ -458,13 +483,13 @@ constructed using a SQLAlchemy helper :func:`.polymorphic_union`.
 As discussed in :ref:`inheritance_loading_toplevel`, mapper inheritance
 configurations of any type can be configured to load from a special selectable
 by default using the :paramref:`.mapper.with_polymorphic` argument.  Current
-public API requires that this argument is set on a :class:`.Mapper` when
+public API requires that this argument is set on a :class:`_orm.Mapper` when
 it is first constructed.
 
-However, in the case of Declarative, both the mapper and the :class:`.Table`
+However, in the case of Declarative, both the mapper and the :class:`_schema.Table`
 that is mapped are created at once, the moment the mapped class is defined.
 This means that the :paramref:`.mapper.with_polymorphic` argument cannot
-be provided yet, since the :class:`.Table` objects that correspond to the
+be provided yet, since the :class:`_schema.Table` objects that correspond to the
 subclasses haven't yet been defined.
 
 There are a few strategies available to resolve this cycle, however
@@ -603,14 +628,6 @@ of ``Manager`` and ``Engineer`` instances.    This brings us back into the
 domain of concrete inheritance, and we must build a special mapper against
 ``Employee`` in order to achieve this.
 
-.. topic:: Mappers can always SELECT
-
-    In SQLAlchemy, a mapper for a class always has to refer to some
-    "selectable", which is normally a :class:`.Table` but may also refer to any
-    :func:`.select` object as well.   While it may appear that a "single table
-    inheritance" mapper does not map to a table, these mappers in fact
-    implicitly refer to the table that is mapped by a superclass.
-
 To modify our concrete inheritance example to illustrate an "abstract" base
 that is capable of polymorphic loading,
 we will have only an ``engineer`` and a ``manager`` table and no ``employee``
@@ -665,13 +682,13 @@ Classical and Semi-Classical Concrete Polymorphic Configuration
 The Declarative configurations illustrated with :class:`.ConcreteBase`
 and :class:`.AbstractConcreteBase` are equivalent to two other forms
 of configuration that make use of :func:`.polymorphic_union` explicitly.
-These configurational forms make use of the :class:`.Table` object explicitly
+These configurational forms make use of the :class:`_schema.Table` object explicitly
 so that the "polymorphic union" can be created first, then applied
 to the mappings.   These are illustrated here to clarify the role
 of the :func:`.polymorphic_union` function in terms of mapping.
 
 A **semi-classical mapping** for example makes use of Declarative, but
-establishes the :class:`.Table` objects separately::
+establishes the :class:`_schema.Table` objects separately::
 
     metadata = Base.metadata
 
@@ -705,7 +722,7 @@ Next, the UNION is produced using :func:`.polymorphic_union`::
         'engineer': engineers_table
     }, 'type', 'pjoin')
 
-With the above :class:`.Table` objects, the mappings can be produced using "semi-classical" style,
+With the above :class:`_schema.Table` objects, the mappings can be produced using "semi-classical" style,
 where we use Declarative in conjunction with the ``__table__`` argument;
 our polymorphic union above is passed via ``__mapper_args__`` to
 the :paramref:`.mapper.with_polymorphic` parameter::
@@ -730,7 +747,7 @@ the :paramref:`.mapper.with_polymorphic` parameter::
             'polymorphic_identity': 'manager',
             'concrete': True}
 
-Alternatively, the same :class:`.Table` objects can be used in
+Alternatively, the same :class:`_schema.Table` objects can be used in
 fully "classical" style, without using Declarative at all.
 A constructor similar to that supplied by Declarative is illustrated::
 
@@ -866,14 +883,14 @@ such a configuration is as follows::
 The next complexity with concrete inheritance and relationships involves
 when we'd like one or all of ``Employee``, ``Manager`` and ``Engineer`` to
 themselves refer back to ``Company``.   For this case, SQLAlchemy has
-special behavior in that a :func:`.relationship` placed on ``Employee``
+special behavior in that a :func:`_orm.relationship` placed on ``Employee``
 which links to ``Company`` **does not work**
 against the ``Manager`` and ``Engineer`` classes, when exercised at the
 instance level.  Instead, a distinct
-:func:`.relationship` must be applied to each class.   In order to achieve
+:func:`_orm.relationship` must be applied to each class.   In order to achieve
 bi-directional behavior in terms of three separate relationships which
 serve as the opposite of ``Company.employees``, the
-:paramref:`.relationship.back_populates` parameter is used between
+:paramref:`_orm.relationship.back_populates` parameter is used between
 each of the relationships::
 
     from sqlalchemy.ext.declarative import ConcreteBase
@@ -936,7 +953,7 @@ Loading Concrete Inheritance Mappings
 The options for loading with concrete inheritance are limited; generally,
 if polymorphic loading is configured on the mapper using one of the
 declarative concrete mixins, it can't be modified at query time
-in current SQLAlchemy versions.   Normally, the :func:`.orm.with_polymorphic`
+in current SQLAlchemy versions.   Normally, the :func:`_orm.with_polymorphic`
 function would be able to override the style of loading used by concrete,
 however due to current limitations this is not yet supported.
 

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy import Sequence
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import text
 from sqlalchemy import TypeDecorator
 from sqlalchemy import util
 from sqlalchemy import VARCHAR
@@ -32,7 +33,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.engines import testing_engine
@@ -51,6 +52,14 @@ users, metadata, users_autoinc = None, None, None
 
 class SomeException(Exception):
     pass
+
+
+class Foo(object):
+    def __str__(self):
+        return "foo"
+
+    def __unicode__(self):
+        return util.u("fóó")
 
 
 class ExecuteTest(fixtures.TestBase):
@@ -436,7 +445,7 @@ class ExecuteTest(fixtures.TestBase):
             eq_(str(err), message)
 
             # unicode accessor decodes to utf-8
-            eq_(unicode(err), util.u("some message méil"))  # noqa
+            eq_(unicode(err), util.u("some message méil"))  # noqa F821
         else:
             eq_(str(err), util.u("some message méil"))
 
@@ -451,7 +460,7 @@ class ExecuteTest(fixtures.TestBase):
             eq_(str(err), message)
 
             # unicode accessor decodes to utf-8
-            eq_(unicode(err), util.u("some message m\\xe9il"))  # noqa
+            eq_(unicode(err), util.u("some message m\\xe9il"))  # noqa F821
         else:
             eq_(str(err), util.u("some message m\\xe9il"))
 
@@ -462,9 +471,16 @@ class ExecuteTest(fixtures.TestBase):
 
         err = tsa.exc.SQLAlchemyError(message)
         if util.py2k:
-            eq_(unicode(err), util.u("some message méil"))  # noqa
+            eq_(unicode(err), util.u("some message méil"))  # noqa F821
         else:
             eq_(str(err), util.u("some message méil"))
+
+    def test_stmt_exception_object_arg(self):
+        err = tsa.exc.SQLAlchemyError(Foo())
+        eq_(str(err), "foo")
+
+        if util.py2k:
+            eq_(unicode(err), util.u("fóó"))  # noqa F821
 
     def test_stmt_exception_str_multi_args(self):
         err = tsa.exc.SQLAlchemyError("some message", 206)
@@ -709,12 +725,13 @@ class ExecuteTest(fixtures.TestBase):
                     return super(MockCursor, self).execute(stmt, params, **kw)
 
         eng = engines.proxying_engine(cursor_cls=MockCursor)
-        assert_raises_message(
-            tsa.exc.SAWarning,
-            "Exception attempting to detect unicode returns",
-            eng.connect,
-        )
-        assert eng.dialect.returns_unicode_strings in (True, False)
+        with testing.expect_warnings(
+            "Exception attempting to detect unicode returns"
+        ):
+            eng.connect()
+
+        # because plain varchar passed, we don't know the correct answer
+        eq_(eng.dialect.returns_unicode_strings, "conditional")
         eng.dispose()
 
     def test_works_after_dispose(self):
@@ -2323,7 +2340,7 @@ class HandleErrorTest(fixtures.TestBase):
 
         for crec in crecs:
             if crec is target_crec or not set_to_false:
-                is_not_(crec.connection, crec.get_connection())
+                is_not(crec.connection, crec.get_connection())
             else:
                 is_(crec.connection, crec.get_connection())
 
@@ -2351,6 +2368,83 @@ class HandleErrorTest(fixtures.TestBase):
                 Mock(side_effect=ProgrammingError("random error")),
             ):
                 assert_raises(MySpecialException, conn.get_isolation_level)
+
+    @testing.only_on("sqlite")
+    def test_cursor_close_resultset_failed_connectionless(self):
+        engine = engines.testing_engine()
+
+        the_conn = []
+        the_cursor = []
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def go(
+            connection, cursor, statement, parameters, context, executemany
+        ):
+            the_cursor.append(cursor)
+            the_conn.append(connection)
+
+        c1, c2 = column("a"), column("b")
+
+        with mock.patch(
+            "sqlalchemy.engine.result.ResultProxy",
+            Mock(side_effect=tsa.exc.InvalidRequestError("duplicate col")),
+        ):
+            # result should fail
+            assert_raises(
+                tsa.exc.InvalidRequestError,
+                engine.execute,
+                text("select 1 as a, 2 as q, 3 as z").columns(c1, c2, c2),
+            )
+
+        # cursor is closed
+        assert_raises_message(
+            engine.dialect.dbapi.ProgrammingError,
+            "Cannot operate on a closed cursor",
+            the_cursor[0].execute,
+            "select 1",
+        )
+
+        # connection is closed
+        assert the_conn[0].closed
+
+    @testing.only_on("sqlite")
+    def test_cursor_close_resultset_failed_explicit(self):
+        engine = engines.testing_engine()
+
+        the_cursor = []
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def go(
+            connection, cursor, statement, parameters, context, executemany
+        ):
+            the_cursor.append(cursor)
+
+        c1, c2 = column("a"), column("b")
+
+        conn = engine.connect()
+
+        with mock.patch(
+            "sqlalchemy.engine.result.ResultProxy",
+            Mock(side_effect=tsa.exc.InvalidRequestError("duplicate col")),
+        ):
+            assert_raises(
+                tsa.exc.InvalidRequestError,
+                conn.execute,
+                text("select 1 as a, 2 as q, 3 as z").columns(c1, c2, c2),
+            )
+
+        # cursor is closed
+        assert_raises_message(
+            engine.dialect.dbapi.ProgrammingError,
+            "Cannot operate on a closed cursor",
+            the_cursor[0].execute,
+            "select 1",
+        )
+
+        # connection not closed
+        assert not conn.closed
+
+        conn.close()
 
 
 class HandleInvalidatedOnConnectTest(fixtures.TestBase):
@@ -2799,11 +2893,14 @@ class AutocommitTextTest(fixtures.TestBase):
             options={"_initialize": False, "pool_reset_on_return": None}
         )
         engine.dialect.dbapi = dbapi
-        engine.execute("%s something table something" % keyword)
-        if expected:
-            eq_(dbapi.connect().mock_calls, [call.cursor(), call.commit()])
-        else:
-            eq_(dbapi.connect().mock_calls, [call.cursor()])
+
+        with engine.connect() as conn:
+            conn.execute("%s something table something" % keyword)
+
+            if expected:
+                eq_(dbapi.connect().mock_calls, [call.cursor(), call.commit()])
+            else:
+                eq_(dbapi.connect().mock_calls, [call.cursor()])
 
     def test_update(self):
         self._test_keyword("UPDATE")

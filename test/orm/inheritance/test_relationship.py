@@ -18,6 +18,7 @@ from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -572,7 +573,7 @@ class M2MFilterTest(fixtures.MappedTest):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Organization = cls.classes.Organization
         e1 = Engineer(name="e1")
         e2 = Engineer(name="e2")
@@ -580,7 +581,7 @@ class M2MFilterTest(fixtures.MappedTest):
         e4 = Engineer(name="e4")
         org1 = Organization(name="org1", engineers=[e1, e2])
         org2 = Organization(name="org2", engineers=[e3, e4])
-        sess = create_session()
+        sess = create_session(connection)
         sess.add(org1)
         sess.add(org2)
         sess.flush()
@@ -898,13 +899,13 @@ class EagerToSubclassTest(fixtures.MappedTest):
         mapper(Related, related)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         global p1, p2
 
         Parent = cls.classes.Parent
         Sub = cls.classes.Sub
         Related = cls.classes.Related
-        sess = Session()
+        sess = Session(connection)
         r1, r2 = Related(data="r1"), Related(data="r2")
         s1 = Sub(data="s1", related=r1)
         s2 = Sub(data="s2", related=r2)
@@ -1077,11 +1078,11 @@ class SubClassEagerToSubClassTest(fixtures.MappedTest):
         mapper(Sub, sub, inherits=Base, polymorphic_identity="s")
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         global p1, p2
 
         Sub, Subparent = cls.classes.Sub, cls.classes.Subparent
-        sess = create_session()
+        sess = create_session(connection)
         p1 = Subparent(
             data="p1",
             children=[Sub(data="s1"), Sub(data="s2"), Sub(data="s3")],
@@ -1263,12 +1264,12 @@ class SameNamedPropTwoPolymorphicSubClassesTest(fixtures.MappedTest):
         mapper(D, cls.tables.d)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         B = cls.classes.B
         C = cls.classes.C
         D = cls.classes.D
 
-        session = Session()
+        session = Session(connection)
 
         d = D()
         session.add_all([B(related=[d]), C(related=[d])])
@@ -1350,9 +1351,7 @@ class SameNamedPropTwoPolymorphicSubClassesTest(fixtures.MappedTest):
 
 
 class SubClassToSubClassFromParentTest(fixtures.MappedTest):
-    """test #2617
-
-    """
+    """test #2617"""
 
     run_setup_classes = "once"
     run_setup_mappers = "once"
@@ -1434,10 +1433,10 @@ class SubClassToSubClassFromParentTest(fixtures.MappedTest):
         mapper(D, cls.tables.d, inherits=A, polymorphic_identity="d")
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         B = cls.classes.B
 
-        session = Session()
+        session = Session(connection)
         session.add(B())
         session.commit()
 
@@ -1722,6 +1721,230 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
             "ON base1.id = base2.base1_id) AS anon_1 "
             "JOIN ep1 ON anon_1.base2_id = ep1.base2_id "
             "JOIN ep2 ON anon_1.base2_id = ep2.base2_id",
+        )
+
+
+class JoinedloadWPolyOfTypeContinued(
+    fixtures.DeclarativeMappedTest, testing.AssertsCompiledSQL
+):
+    """test for #5082 """
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class User(Base):
+            __tablename__ = "users"
+
+            id = Column(Integer, primary_key=True)
+            foos = relationship("Foo", back_populates="owner")
+
+        class Foo(Base):
+            __tablename__ = "foos"
+            __mapper_args__ = {"polymorphic_on": "type"}
+
+            id = Column(Integer, primary_key=True)
+            type = Column(String(10), nullable=False)
+            owner_id = Column(Integer, ForeignKey("users.id"))
+            owner = relationship("User", back_populates="foos")
+            bar_id = Column(ForeignKey("bars.id"))
+            bar = relationship("Bar")
+
+        class SubFoo(Foo):
+            __tablename__ = "foos_sub"
+            __mapper_args__ = {"polymorphic_identity": "SUB"}
+
+            id = Column(Integer, ForeignKey("foos.id"), primary_key=True)
+            baz = Column(Integer)
+            sub_bar_id = Column(Integer, ForeignKey("sub_bars.id"))
+            sub_bar = relationship("SubBar")
+
+        class Bar(Base):
+            __tablename__ = "bars"
+
+            id = Column(Integer, primary_key=True)
+            fred_id = Column(Integer, ForeignKey("freds.id"), nullable=False)
+            fred = relationship("Fred")
+
+        class SubBar(Base):
+            __tablename__ = "sub_bars"
+
+            id = Column(Integer, primary_key=True)
+            fred_id = Column(Integer, ForeignKey("freds.id"), nullable=False)
+            fred = relationship("Fred")
+
+        class Fred(Base):
+            __tablename__ = "freds"
+
+            id = Column(Integer, primary_key=True)
+
+    @classmethod
+    def insert_data(cls, connection):
+        User, Fred, SubBar, Bar, SubFoo = cls.classes(
+            "User", "Fred", "SubBar", "Bar", "SubFoo"
+        )
+        user = User(id=1)
+        fred = Fred(id=1)
+        bar = Bar(fred=fred)
+        sub_bar = SubBar(fred=fred)
+        rectangle = SubFoo(owner=user, baz=10, bar=bar, sub_bar=sub_bar)
+
+        s = Session(connection)
+        s.add_all([user, fred, bar, sub_bar, rectangle])
+        s.commit()
+
+    def test_joined_load_lastlink_subclass(self):
+        Foo, User, SubBar = self.classes("Foo", "User", "SubBar")
+
+        s = Session()
+
+        foo_polymorphic = with_polymorphic(Foo, "*", aliased=True)
+
+        foo_load = joinedload(User.foos.of_type(foo_polymorphic))
+        query = s.query(User).options(
+            foo_load.joinedload(foo_polymorphic.SubFoo.sub_bar).joinedload(
+                SubBar.fred
+            )
+        )
+
+        self.assert_compile(
+            query,
+            "SELECT users.id AS users_id, anon_1.foos_id AS anon_1_foos_id, "
+            "anon_1.foos_type AS anon_1_foos_type, anon_1.foos_owner_id "
+            "AS anon_1_foos_owner_id, "
+            "anon_1.foos_bar_id AS anon_1_foos_bar_id, "
+            "freds_1.id AS freds_1_id, sub_bars_1.id "
+            "AS sub_bars_1_id, sub_bars_1.fred_id AS sub_bars_1_fred_id, "
+            "anon_1.foos_sub_id AS anon_1_foos_sub_id, "
+            "anon_1.foos_sub_baz AS anon_1_foos_sub_baz, "
+            "anon_1.foos_sub_sub_bar_id AS anon_1_foos_sub_sub_bar_id "
+            "FROM users LEFT OUTER JOIN "
+            "(SELECT foos.id AS foos_id, foos.type AS foos_type, "
+            "foos.owner_id AS foos_owner_id, foos.bar_id AS foos_bar_id, "
+            "foos_sub.id AS foos_sub_id, "
+            "foos_sub.baz AS foos_sub_baz, "
+            "foos_sub.sub_bar_id AS foos_sub_sub_bar_id "
+            "FROM foos LEFT OUTER JOIN foos_sub ON foos.id = foos_sub.id) "
+            "AS anon_1 ON users.id = anon_1.foos_owner_id "
+            "LEFT OUTER JOIN sub_bars AS sub_bars_1 "
+            "ON sub_bars_1.id = anon_1.foos_sub_sub_bar_id "
+            "LEFT OUTER JOIN freds AS freds_1 "
+            "ON freds_1.id = sub_bars_1.fred_id",
+        )
+
+        def go():
+            user = query.one()
+            user.foos[0].sub_bar
+            user.foos[0].sub_bar.fred
+
+        self.assert_sql_count(testing.db, go, 1)
+
+    def test_joined_load_lastlink_baseclass(self):
+        Foo, User, Bar = self.classes("Foo", "User", "Bar")
+
+        s = Session()
+
+        foo_polymorphic = with_polymorphic(Foo, "*", aliased=True)
+
+        foo_load = joinedload(User.foos.of_type(foo_polymorphic))
+        query = s.query(User).options(
+            foo_load.joinedload(foo_polymorphic.bar).joinedload(Bar.fred)
+        )
+
+        self.assert_compile(
+            query,
+            "SELECT users.id AS users_id, freds_1.id AS freds_1_id, "
+            "bars_1.id AS bars_1_id, "
+            "bars_1.fred_id AS bars_1_fred_id, "
+            "anon_1.foos_id AS anon_1_foos_id, "
+            "anon_1.foos_type AS anon_1_foos_type, anon_1.foos_owner_id AS "
+            "anon_1_foos_owner_id, anon_1.foos_bar_id AS anon_1_foos_bar_id, "
+            "anon_1.foos_sub_id AS anon_1_foos_sub_id, anon_1.foos_sub_baz AS "
+            "anon_1_foos_sub_baz, "
+            "anon_1.foos_sub_sub_bar_id AS anon_1_foos_sub_sub_bar_id "
+            "FROM users LEFT OUTER JOIN (SELECT foos.id AS foos_id, "
+            "foos.type AS foos_type, "
+            "foos.owner_id AS foos_owner_id, foos.bar_id AS foos_bar_id, "
+            "foos_sub.id AS "
+            "foos_sub_id, foos_sub.baz AS foos_sub_baz, "
+            "foos_sub.sub_bar_id AS "
+            "foos_sub_sub_bar_id FROM foos "
+            "LEFT OUTER JOIN foos_sub ON foos.id = "
+            "foos_sub.id) AS anon_1 ON users.id = anon_1.foos_owner_id "
+            "LEFT OUTER JOIN bars "
+            "AS bars_1 ON bars_1.id = anon_1.foos_bar_id "
+            "LEFT OUTER JOIN freds AS freds_1 ON freds_1.id = bars_1.fred_id",
+        )
+
+        def go():
+            user = query.one()
+            user.foos[0].bar
+            user.foos[0].bar.fred
+
+        self.assert_sql_count(testing.db, go, 1)
+
+
+class ContainsEagerMultipleOfType(
+    fixtures.DeclarativeMappedTest, testing.AssertsCompiledSQL
+):
+    """test for #5107 """
+
+    __dialect__ = "default"
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class X(Base):
+            __tablename__ = "x"
+            id = Column(Integer, primary_key=True)
+            a_id = Column(Integer, ForeignKey("a.id"))
+            a = relationship("A", back_populates="x")
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            b = relationship("B", back_populates="a")
+            kind = Column(String(30))
+            x = relationship("X", back_populates="a")
+            __mapper_args__ = {
+                "polymorphic_identity": "a",
+                "polymorphic_on": kind,
+                "with_polymorphic": "*",
+            }
+
+        class B(A):
+            a_id = Column(Integer, ForeignKey("a.id"))
+            a = relationship(
+                "A", back_populates="b", uselist=False, remote_side=A.id
+            )
+            __mapper_args__ = {"polymorphic_identity": "b"}
+
+    def test_contains_eager_multi_alias(self):
+        X, B, A = self.classes("X", "B", "A")
+        s = Session()
+
+        a_b_alias = aliased(B, name="a_b")
+        b_x_alias = aliased(X, name="b_x")
+
+        q = (
+            s.query(A)
+            .outerjoin(A.b.of_type(a_b_alias))
+            .outerjoin(a_b_alias.x.of_type(b_x_alias))
+            .options(
+                contains_eager(A.b.of_type(a_b_alias)).contains_eager(
+                    a_b_alias.x.of_type(b_x_alias)
+                )
+            )
+        )
+        self.assert_compile(
+            q,
+            "SELECT b_x.id AS b_x_id, b_x.a_id AS b_x_a_id, a_b.id AS a_b_id, "
+            "a_b.kind AS a_b_kind, a_b.a_id AS a_b_a_id, a.id AS a_id_1, "
+            "a.kind AS a_kind, a.a_id AS a_a_id FROM a "
+            "LEFT OUTER JOIN a AS a_b ON a.id = a_b.a_id AND a_b.kind IN "
+            "(:kind_1) LEFT OUTER JOIN x AS b_x "
+            "ON a_b.id = b_x.a_id",
         )
 
 
@@ -2454,3 +2677,75 @@ class BetweenSubclassJoinWExtraJoinedLoad(
             "seen AS seen_1 ON people.id = seen_1.id LEFT OUTER JOIN "
             "seen AS seen_2 ON people_1.id = seen_2.id",
         )
+
+
+class M2ODontLoadSiblingTest(fixtures.DeclarativeMappedTest):
+    """test for #5210"""
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class Parent(Base, ComparableEntity):
+            __tablename__ = "parents"
+
+            id = Column(Integer, primary_key=True)
+            child_type = Column(String(50), nullable=False)
+
+            __mapper_args__ = {
+                "polymorphic_on": child_type,
+            }
+
+        class Child1(Parent):
+            __tablename__ = "children_1"
+
+            id = Column(Integer, ForeignKey(Parent.id), primary_key=True)
+
+            __mapper_args__ = {
+                "polymorphic_identity": "child1",
+            }
+
+        class Child2(Parent):
+            __tablename__ = "children_2"
+
+            id = Column(Integer, ForeignKey(Parent.id), primary_key=True)
+
+            __mapper_args__ = {
+                "polymorphic_identity": "child2",
+            }
+
+        class Other(Base):
+            __tablename__ = "others"
+
+            id = Column(Integer, primary_key=True)
+            parent_id = Column(Integer, ForeignKey(Parent.id))
+
+            parent = relationship(Parent)
+            child2 = relationship(Child2, viewonly=True)
+
+    @classmethod
+    def insert_data(cls, connection):
+        Other, Child1 = cls.classes("Other", "Child1")
+        s = Session(connection)
+        obj = Other(parent=Child1())
+        s.add(obj)
+        s.commit()
+
+    def test_load_m2o_emit_query(self):
+        Other, Child1 = self.classes("Other", "Child1")
+        s = Session()
+
+        obj = s.query(Other).first()
+
+        is_(obj.child2, None)
+        eq_(obj.parent, Child1())
+
+    def test_load_m2o_use_get(self):
+        Other, Child1 = self.classes("Other", "Child1")
+        s = Session()
+
+        obj = s.query(Other).first()
+        c1 = s.query(Child1).first()
+
+        is_(obj.child2, None)
+        is_(obj.parent, c1)

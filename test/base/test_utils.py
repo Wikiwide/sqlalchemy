@@ -1,8 +1,8 @@
 #! coding: utf-8
 
 import copy
+import datetime
 import inspect
-import sys
 
 from sqlalchemy import exc
 from sqlalchemy import sql
@@ -25,6 +25,7 @@ from sqlalchemy.util import classproperty
 from sqlalchemy.util import compat
 from sqlalchemy.util import get_callable_argspec
 from sqlalchemy.util import langhelpers
+from sqlalchemy.util import timezone
 from sqlalchemy.util import WeakSequence
 
 
@@ -810,6 +811,13 @@ class HashOverride(object):
         return hash(self.value)
 
 
+class NoHash(object):
+    def __init__(self, value=None):
+        self.value = value
+
+    __hash__ = None
+
+
 class EqOverride(object):
     def __init__(self, value=None):
         self.value = value
@@ -850,6 +858,8 @@ class HashEqOverride(object):
 
 
 class IdentitySetTest(fixtures.TestBase):
+    obj_type = object
+
     def assert_eq(self, identityset, expected_iterable):
         expected = sorted([id(o) for o in expected_iterable])
         found = sorted([id(o) for o in identityset])
@@ -879,7 +889,7 @@ class IdentitySetTest(fixtures.TestBase):
                 ids.add(data[i])
             self.assert_eq(ids, data)
 
-        for type_ in (EqOverride, HashOverride, HashEqOverride):
+        for type_ in (NoHash, EqOverride, HashOverride, HashEqOverride):
             data = [type_(1), type_(1), type_(2)]
             ids = util.IdentitySet()
             for i in list(range(3)) + list(range(3)):
@@ -888,7 +898,7 @@ class IdentitySetTest(fixtures.TestBase):
 
     def test_dunder_sub2(self):
         IdentitySet = util.IdentitySet
-        o1, o2, o3 = object(), object(), object()
+        o1, o2, o3 = self.obj_type(), self.obj_type(), self.obj_type()
         ids1 = IdentitySet([o1])
         ids2 = IdentitySet([o1, o2, o3])
         eq_(ids2 - ids1, IdentitySet([o2, o3]))
@@ -1301,7 +1311,13 @@ class IdentitySetTest(fixtures.TestBase):
         pass  # TODO
 
     def _create_sets(self):
-        o1, o2, o3, o4, o5 = object(), object(), object(), object(), object()
+        o1, o2, o3, o4, o5 = (
+            self.obj_type(),
+            self.obj_type(),
+            self.obj_type(),
+            self.obj_type(),
+            self.obj_type(),
+        )
         super_ = util.IdentitySet([o1, o2, o3])
         sub_ = util.IdentitySet([o2])
         twin1 = util.IdentitySet([o3])
@@ -1325,7 +1341,7 @@ class IdentitySetTest(fixtures.TestBase):
     def test_basic_sanity(self):
         IdentitySet = util.IdentitySet
 
-        o1, o2, o3 = object(), object(), object()
+        o1, o2, o3 = self.obj_type(), self.obj_type(), self.obj_type()
         ids = IdentitySet([o1])
         ids.discard(o1)
         ids.discard(o1)
@@ -1388,6 +1404,10 @@ class IdentitySetTest(fixtures.TestBase):
 
         assert_raises(TypeError, util.cmp, ids)
         assert_raises(TypeError, hash, ids)
+
+
+class NoHashIdentitySetTest(IdentitySetTest):
+    obj_type = NoHash
 
 
 class OrderedIdentitySetTest(fixtures.TestBase):
@@ -2529,20 +2549,7 @@ class ReraiseTest(fixtures.TestBase):
         except MyException as err:
             is_(err.__cause__, None)
 
-    def test_reraise_disallow_same_cause(self):
-        class MyException(Exception):
-            pass
-
-        def go():
-            try:
-                raise MyException("exc one")
-            except Exception as err:
-                type_, value, tb = sys.exc_info()
-                util.reraise(type_, err, tb, value)
-
-        assert_raises_message(AssertionError, "Same cause emitted", go)
-
-    def test_raise_from_cause(self):
+    def test_raise_from_cause_legacy(self):
         class MyException(Exception):
             pass
 
@@ -2556,6 +2563,28 @@ class ReraiseTest(fixtures.TestBase):
                 raise me
             except Exception:
                 util.raise_from_cause(MyOtherException("exc two"))
+
+        try:
+            go()
+            assert False
+        except MyOtherException as moe:
+            if testing.requires.python3.enabled:
+                is_(moe.__cause__, me)
+
+    def test_raise_from(self):
+        class MyException(Exception):
+            pass
+
+        class MyOtherException(Exception):
+            pass
+
+        me = MyException("exc on")
+
+        def go():
+            try:
+                raise me
+            except Exception as err:
+                util.raise_(MyOtherException("exc two"), from_=err)
 
         try:
             go()
@@ -2765,4 +2794,71 @@ class BackslashReplaceTest(fixtures.TestBase):
         eq_(
             compat.decode_backslashreplace(message, "cp1251"),
             util.u("some message П"),
+        )
+
+
+class TimezoneTest(fixtures.TestBase):
+    """test the python 2 backport of the "timezone" class.
+
+    Note under python 3, these tests work against the builtin timezone,
+    thereby providing confirmation that the tests are correct.
+
+    """
+
+    @testing.combinations(
+        (datetime.timedelta(0), "UTC"),
+        (datetime.timedelta(hours=5), "UTC+05:00"),
+        (datetime.timedelta(hours=5, minutes=10), "UTC+05:10"),
+        (
+            datetime.timedelta(hours=5, minutes=10, seconds=27),
+            "UTC+05:10:27",
+            testing.requires.granular_timezone,
+        ),
+        (datetime.timedelta(hours=-3, minutes=10), "UTC-02:50"),
+        (
+            datetime.timedelta(
+                hours=5, minutes=10, seconds=27, microseconds=550
+            ),
+            "UTC+05:10:27.000550",
+            testing.requires.granular_timezone,
+        ),
+    )
+    def test_tzname(self, td, expected):
+        if expected == "UTC" and util.py3k and not util.py36:
+            expected += "+00:00"
+        eq_(timezone(td).tzname(None), expected)
+
+    def test_utcoffset(self):
+        eq_(
+            timezone(datetime.timedelta(hours=5)).utcoffset(None),
+            datetime.timedelta(hours=5),
+        )
+
+    def test_fromutc(self):
+        tzinfo = timezone(datetime.timedelta(hours=5))
+        dt = datetime.datetime(2017, 10, 5, 12, 55, 38, tzinfo=tzinfo)
+        eq_(
+            dt.astimezone(timezone.utc),
+            datetime.datetime(2017, 10, 5, 7, 55, 38, tzinfo=timezone.utc),
+        )
+
+        # this is the same as hours=-3
+        del_ = datetime.timedelta(days=-1, seconds=75600)
+        eq_(
+            dt.astimezone(timezone(datetime.timedelta(hours=-3))),
+            datetime.datetime(2017, 10, 5, 4, 55, 38, tzinfo=timezone(del_)),
+        )
+
+    @testing.requires.python3
+    def test_repr_py3k(self):
+        eq_(
+            repr(timezone(datetime.timedelta(hours=5))),
+            "datetime.timezone(%r)" % (datetime.timedelta(hours=5)),
+        )
+
+    @testing.requires.python2
+    def test_repr_py2k(self):
+        eq_(
+            repr(timezone(datetime.timedelta(hours=5))),
+            "sqlalchemy.util.timezone(%r)" % (datetime.timedelta(hours=5)),
         )

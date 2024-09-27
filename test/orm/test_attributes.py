@@ -575,7 +575,7 @@ class AttributesTest(fixtures.ORMTest):
 
     def test_lazytrackparent(self):
         """test that the "hasparent" flag works properly
-           when lazy loaders and backrefs are used
+        when lazy loaders and backrefs are used
 
         """
 
@@ -837,7 +837,7 @@ class AttributesTest(fixtures.ORMTest):
         """changeset: 1633 broke ability to use ORM to map classes with
         unusual descriptor attributes (for example, classes that inherit
         from ones implementing zope.interface.Interface). This is a
-        simple regression test to prevent that defect. """
+        simple regression test to prevent that defect."""
 
         class des(object):
             def __get__(self, instance, owner):
@@ -1090,6 +1090,32 @@ class UtilTest(fixtures.ORMTest):
 
         attributes.del_attribute(f1, "coll")
         assert "coll" not in f1.__dict__
+
+    def test_set_commited_value_none_uselist(self):
+        """test that set_committed_value->None to a uselist generates an
+        empty list"""
+
+        class Foo(object):
+            pass
+
+        class Bar(object):
+            pass
+
+        instrumentation.register_class(Foo)
+        instrumentation.register_class(Bar)
+        attributes.register_attribute(
+            Foo, "col_list", uselist=True, useobject=True
+        )
+        attributes.register_attribute(
+            Foo, "col_set", uselist=True, useobject=True, typecallable=set
+        )
+
+        f1 = Foo()
+        attributes.set_committed_value(f1, "col_list", None)
+        eq_(f1.col_list, [])
+
+        attributes.set_committed_value(f1, "col_set", None)
+        eq_(f1.col_set, set())
 
     def test_initiator_arg(self):
         class Foo(object):

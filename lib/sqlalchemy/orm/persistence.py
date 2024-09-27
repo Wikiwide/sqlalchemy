@@ -1,12 +1,12 @@
 # orm/persistence.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
 # the MIT License: http://www.opensource.org/licenses/mit-license.php
 
 """private module containing functions used to emit INSERT, UPDATE
-and DELETE statements on behalf of a :class:`.Mapper` and its descending
+and DELETE statements on behalf of a :class:`_orm.Mapper` and its descending
 mappers.
 
 The functions here are called only by the unit of work functions
@@ -194,7 +194,7 @@ def save_obj(base_mapper, states, uowtransaction, single=False):
 
     # if batch=false, call _save_obj separately for each object
     if not single and not base_mapper.batch:
-        for state in _sort_states(states):
+        for state in _sort_states(base_mapper, states):
             save_obj(base_mapper, [state], uowtransaction, single=True)
         return
 
@@ -502,9 +502,8 @@ def _collect_insert_commands(
             col = propkey_to_col[propkey]
             if value is None and col not in eval_none and not render_nulls:
                 continue
-            elif (
-                not bulk
-                and hasattr(value, "__clause_element__")
+            elif not bulk and (
+                hasattr(value, "__clause_element__")
                 or isinstance(value, sql.ClauseElement)
             ):
                 value_params[col] = (
@@ -1082,7 +1081,6 @@ def _emit_insert_statements(
             multiparams = [rec[2] for rec in records]
 
             c = cached_connections[connection].execute(statement, multiparams)
-
             if bookkeeping:
                 for (
                     (
@@ -1335,8 +1333,7 @@ def _emit_delete_statements(
                 util.warn(
                     "Dialect %s does not support deleted rowcount "
                     "- versioning cannot be verified."
-                    % connection.dialect.dialect_description,
-                    stacklevel=12,
+                    % connection.dialect.dialect_description
                 )
                 connection.execute(statement, del_objects)
         else:
@@ -1605,7 +1602,7 @@ def _connections_for_states(base_mapper, uowtransaction, states):
         connection = uowtransaction.transaction.connection(base_mapper)
         connection_callable = None
 
-    for state in _sort_states(states):
+    for state in _sort_states(base_mapper, states):
         if connection_callable:
             connection = connection_callable(base_mapper, state.obj())
 
@@ -1623,16 +1620,22 @@ def _cached_connection_dict(base_mapper):
     )
 
 
-def _sort_states(states):
+def _sort_states(mapper, states):
     pending = set(states)
     persistent = set(s for s in pending if s.key is not None)
     pending.difference_update(persistent)
+
     try:
-        persistent_sorted = sorted(persistent, key=lambda q: q.key[1])
+        persistent_sorted = sorted(
+            persistent, key=mapper._persistent_sortkey_fn
+        )
     except TypeError as err:
-        raise sa_exc.InvalidRequestError(
-            "Could not sort objects by primary key; primary key "
-            "values must be sortable in Python (was: %s)" % err
+        util.raise_(
+            sa_exc.InvalidRequestError(
+                "Could not sort objects by primary key; primary key "
+                "values must be sortable in Python (was: %s)" % err
+            ),
+            replace_context=err,
         )
     return (
         sorted(pending, key=operator.attrgetter("insert_order"))
@@ -1641,7 +1644,7 @@ def _sort_states(states):
 
 
 class BulkUD(object):
-    """Handle bulk update and deletes via a :class:`.Query`."""
+    """Handle bulk update and deletes via a :class:`_query.Query`."""
 
     def __init__(self, query):
         self.query = query.enable_eagerloads(False)
@@ -1676,10 +1679,13 @@ class BulkUD(object):
     def _factory(cls, lookup, synchronize_session, *arg):
         try:
             klass = lookup[synchronize_session]
-        except KeyError:
-            raise sa_exc.ArgumentError(
-                "Valid strategies for session synchronization "
-                "are %s" % (", ".join(sorted(repr(x) for x in lookup)))
+        except KeyError as err:
+            util.raise_(
+                sa_exc.ArgumentError(
+                    "Valid strategies for session synchronization "
+                    "are %s" % (", ".join(sorted(repr(x) for x in lookup)))
+                ),
+                replace_context=err,
             )
         else:
             return klass(*arg)
@@ -1763,10 +1769,13 @@ class BulkEvaluate(BulkUD):
             self._additional_evaluators(evaluator_compiler)
 
         except evaluator.UnevaluatableError as err:
-            raise sa_exc.InvalidRequestError(
-                'Could not evaluate current criteria in Python: "%s". '
-                "Specify 'fetch' or False for the "
-                "synchronize_session parameter." % err
+            util.raise_(
+                sa_exc.InvalidRequestError(
+                    'Could not evaluate current criteria in Python: "%s". '
+                    "Specify 'fetch' or False for the "
+                    "synchronize_session parameter." % err
+                ),
+                from_=err,
             )
 
         # TODO: detect when the where clause is a trivial primary key match
@@ -1777,7 +1786,9 @@ class BulkEvaluate(BulkUD):
                 pk,
                 identity_token,
             ), obj in query.session.identity_map.items()
-            if issubclass(cls, target_cls) and eval_condition(obj)
+            if issubclass(cls, target_cls)
+            and not attributes.instance_state(obj).expired
+            and eval_condition(obj)
         ]
 
 
@@ -1948,7 +1959,8 @@ class BulkUpdateEvaluate(BulkEvaluate, BulkUpdate):
             # only evaluate unmodified attributes
             to_evaluate = state.unmodified.intersection(evaluated_keys)
             for key in to_evaluate:
-                dict_[key] = self.value_evaluators[key](obj)
+                if key in dict_:
+                    dict_[key] = self.value_evaluators[key](obj)
 
             state.manager.dispatch.refresh(state, None, to_evaluate)
 

@@ -9,13 +9,16 @@ from sqlalchemy import event
 from sqlalchemy import pool
 from sqlalchemy import select
 from sqlalchemy import testing
+from sqlalchemy.engine import default
 from sqlalchemy.testing import assert_raises
+from sqlalchemy.testing import assert_raises_context_ok
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
+from sqlalchemy.testing import mock
 from sqlalchemy.testing.engines import testing_engine
 from sqlalchemy.testing.mock import ANY
 from sqlalchemy.testing.mock import call
@@ -23,7 +26,6 @@ from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.mock import patch
 from sqlalchemy.testing.util import gc_collect
 from sqlalchemy.testing.util import lazy_gc
-
 
 join_timeout = 10
 
@@ -150,7 +152,7 @@ class PoolTest(PoolTestBase):
         self.assert_("foo2" in c.info)
 
         c2 = p.connect()
-        is_not_(c.connection, c2.connection)
+        is_not(c.connection, c2.connection)
         assert not c2.info
         assert "foo2" in c.info
 
@@ -214,10 +216,64 @@ class PoolTest(PoolTestBase):
 
         c2 = r1.get_connection()
 
-        is_not_(c1, c2)
+        is_not(c1, c2)
         is_(c2, r1.connection)
 
         eq_(c2.mock_calls, [])
+
+    @testing.combinations(
+        (
+            pool.QueuePool,
+            dict(pool_size=8, max_overflow=10, timeout=25, use_lifo=True),
+        ),
+        (pool.QueuePool, {}),
+        (pool.NullPool, {}),
+        (pool.SingletonThreadPool, {}),
+        (pool.StaticPool, {}),
+        (pool.AssertionPool, {}),
+    )
+    def test_recreate_state(self, pool_cls, pool_args):
+        creator = object()
+        pool_args["pre_ping"] = True
+        pool_args["reset_on_return"] = "commit"
+        pool_args["recycle"] = 35
+        pool_args["logging_name"] = "somepool"
+        pool_args["dialect"] = default.DefaultDialect()
+        pool_args["echo"] = "debug"
+
+        p1 = pool_cls(creator=creator, **pool_args)
+
+        cls_keys = dir(pool_cls)
+
+        d1 = dict(p1.__dict__)
+
+        p2 = p1.recreate()
+
+        d2 = dict(p2.__dict__)
+
+        for k in cls_keys:
+            d1.pop(k, None)
+            d2.pop(k, None)
+
+        for k in (
+            "_threadconns",
+            "_invoke_creator",
+            "_pool",
+            "_overflow_lock",
+            "_fairy",
+            "_conn",
+            "logger",
+        ):
+            if k in d2:
+                d2[k] = mock.ANY
+
+        eq_(d1, d2)
+
+        eq_(p1.echo, p2.echo)
+        is_(p1._dialect, p2._dialect)
+
+        if "use_lifo" in pool_args:
+            eq_(p1._pool.use_lifo, p2._pool.use_lifo)
 
 
 class PoolDialectTest(PoolTestBase):
@@ -1188,7 +1244,7 @@ class QueuePoolTest(PoolTestBase):
 
             mock.return_value = 10035
             c3 = p.connect()
-            is_not_(c3.connection, c_ref())
+            is_not(c3.connection, c_ref())
 
     @testing.requires.timing_intensive
     def test_recycle_on_invalidate(self):
@@ -1206,7 +1262,7 @@ class QueuePoolTest(PoolTestBase):
         time.sleep(0.5)
         c3 = p.connect()
 
-        is_not_(c3.connection, c_ref())
+        is_not(c3.connection, c_ref())
 
     @testing.requires.timing_intensive
     def test_recycle_on_soft_invalidate(self):
@@ -1218,13 +1274,18 @@ class QueuePoolTest(PoolTestBase):
         is_(c2.connection, c_ref())
 
         c2_rec = c2._connection_record
+
+        # ensure pool invalidate time will be later than starttime
+        # for ConnectionRecord objects above
+        time.sleep(0.1)
         c2.invalidate(soft=True)
+
         is_(c2_rec.connection, c2.connection)
 
         c2.close()
-        time.sleep(0.5)
+
         c3 = p.connect()
-        is_not_(c3.connection, c_ref())
+        is_not(c3.connection, c_ref())
         is_(c3._connection_record, c2_rec)
         is_(c2_rec.connection, c3.connection)
 
@@ -1253,7 +1314,7 @@ class QueuePoolTest(PoolTestBase):
             eq_(p.checkedout(), 0)
             eq_(p._overflow, 0)
             dbapi.shutdown(True)
-            assert_raises(Exception, p.connect)
+            assert_raises_context_ok(Exception, p.connect)
             eq_(p._overflow, 0)
             eq_(p.checkedout(), 0)  # and not 1
 
@@ -1286,6 +1347,7 @@ class QueuePoolTest(PoolTestBase):
         time.sleep(1.5)
         self._assert_cleanup_on_pooled_reconnect(dbapi, p)
 
+    @testing.requires.timing_intensive
     def test_connect_handler_not_called_for_recycled(self):
         """test [ticket:3497]"""
 
@@ -1300,6 +1362,10 @@ class QueuePoolTest(PoolTestBase):
         c2.close()
 
         dbapi.shutdown(True)
+
+        # ensure pool invalidate time will be later than starttime
+        # for ConnectionRecord objects above
+        time.sleep(0.1)
 
         bad = p.connect()
         p._invalidate(bad)
@@ -1324,6 +1390,7 @@ class QueuePoolTest(PoolTestBase):
             [call.connect(ANY, ANY), call.checkout(ANY, ANY, ANY)],
         )
 
+    @testing.requires.timing_intensive
     def test_connect_checkout_handler_always_gets_info(self):
         """test [ticket:3497]"""
 
@@ -1336,6 +1403,10 @@ class QueuePoolTest(PoolTestBase):
         c2.close()
 
         dbapi.shutdown(True)
+
+        # ensure pool invalidate time will be later than starttime
+        # for ConnectionRecord objects above
+        time.sleep(0.1)
 
         bad = p.connect()
         p._invalidate(bad)
@@ -1675,6 +1746,8 @@ class ResetOnReturnTest(PoolTestBase):
             def __init__(self, conn):
                 self.conn = conn
 
+            is_active = True
+
             def rollback(self):
                 self.conn.special_rollback()
 
@@ -1705,6 +1778,8 @@ class ResetOnReturnTest(PoolTestBase):
         class Agent(object):
             def __init__(self, conn):
                 self.conn = conn
+
+            is_active = True
 
             def rollback(self):
                 self.conn.special_rollback()

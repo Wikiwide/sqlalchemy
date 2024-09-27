@@ -1,4 +1,4 @@
-.. module:: sqlalchemy.types
+.. currentmodule:: sqlalchemy.types
 
 .. _types_api:
 
@@ -20,5 +20,4 @@ Base Type API
 
 
 .. autoclass:: Variant
-
    :members: with_variant, __init__

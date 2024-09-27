@@ -1069,8 +1069,8 @@ class ExpireTest(_fixtures.FixtureTest):
         eq_(len(list(sess)), 9)
 
     def test_state_change_col_to_deferred(self):
-        """Behavioral test to verify the current activity of loader callables
-        """
+        """Behavioral test to verify the current activity of loader
+        callables"""
 
         users, User = self.tables.users, self.classes.User
 
@@ -1117,8 +1117,8 @@ class ExpireTest(_fixtures.FixtureTest):
         assert "name" not in attributes.instance_state(u1).callables
 
     def test_state_deferred_to_col(self):
-        """Behavioral test to verify the current activity of loader callables
-        """
+        """Behavioral test to verify the current activity of loader
+        callables"""
 
         users, User = self.tables.users, self.classes.User
 
@@ -1157,8 +1157,8 @@ class ExpireTest(_fixtures.FixtureTest):
         assert "name" not in attributes.instance_state(u1).callables
 
     def test_state_noload_to_lazy(self):
-        """Behavioral test to verify the current activity of loader callables
-        """
+        """Behavioral test to verify the current activity of loader
+        callables"""
 
         users, Address, addresses, User = (
             self.tables.users,
@@ -1302,15 +1302,17 @@ class PolymorphicExpireTest(fixtures.MappedTest):
             pass
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         people, engineers = cls.tables.people, cls.tables.engineers
 
-        people.insert().execute(
+        connection.execute(
+            people.insert(),
             {"person_id": 1, "name": "person1", "type": "person"},
             {"person_id": 2, "name": "engineer1", "type": "engineer"},
             {"person_id": 3, "name": "engineer2", "type": "engineer"},
         )
-        engineers.insert().execute(
+        connection.execute(
+            engineers.insert(),
             {"person_id": 2, "status": "new engineer"},
             {"person_id": 3, "status": "old engineer"},
         )

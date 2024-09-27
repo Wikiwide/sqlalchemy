@@ -8,6 +8,7 @@ from sqlalchemy import CHAR
 from sqlalchemy import CheckConstraint
 from sqlalchemy import CLOB
 from sqlalchemy import Column
+from sqlalchemy import Computed
 from sqlalchemy import DATE
 from sqlalchemy import Date
 from sqlalchemy import DATETIME
@@ -37,7 +38,9 @@ from sqlalchemy import SmallInteger
 from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import testing
 from sqlalchemy import TEXT
+from sqlalchemy import text
 from sqlalchemy import TIME
 from sqlalchemy import Time
 from sqlalchemy import TIMESTAMP
@@ -95,6 +98,45 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             schema.CreateIndex(idx),
             "CREATE FULLTEXT INDEX test_idx1 " "ON testtbl (data(10))",
+        )
+
+    def test_create_index_with_text(self):
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("data", String(255)))
+        idx = Index("test_idx1", text("created_at desc"), _table=tbl)
+
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX test_idx1 ON testtbl (created_at desc)",
+        )
+
+    def test_create_index_with_arbitrary_column_element(self):
+        from sqlalchemy.ext.compiler import compiles
+
+        class _textual_index_element(sql.ColumnElement):
+            """alembic's wrapper"""
+
+            __visit_name__ = "_textual_idx_element"
+
+            def __init__(self, table, text):
+                self.table = table
+                self.text = text
+
+        @compiles(_textual_index_element)
+        def _render_textual_index_column(element, compiler, **kw):
+            return compiler.process(element.text, **kw)
+
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("data", String(255)))
+        idx = Index(
+            "test_idx1",
+            _textual_index_element(tbl, text("created_at desc")),
+            _table=tbl,
+        )
+
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX test_idx1 ON testtbl (created_at desc)",
         )
 
     def test_create_index_with_parser(self):
@@ -286,7 +328,50 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         t1 = Table("foo", m, Column("x", Integer))
         self.assert_compile(
             schema.CreateIndex(Index("bar", t1.c.x > 5)),
-            "CREATE INDEX bar ON foo (x > 5)",
+            "CREATE INDEX bar ON foo ((x > 5))",
+        )
+
+    def test_create_index_expr_two(self):
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("x", Integer), Column("y", Integer))
+        idx1 = Index("test_idx1", tbl.c.x + tbl.c.y)
+        idx2 = Index(
+            "test_idx2", tbl.c.x, tbl.c.x + tbl.c.y, tbl.c.y - tbl.c.x
+        )
+        idx3 = Index("test_idx3", tbl.c.x.desc())
+
+        self.assert_compile(
+            schema.CreateIndex(idx1),
+            "CREATE INDEX test_idx1 ON testtbl ((x + y))",
+        )
+        self.assert_compile(
+            schema.CreateIndex(idx2),
+            "CREATE INDEX test_idx2 ON testtbl (x, (x + y), (y - x))",
+        )
+
+        self.assert_compile(
+            schema.CreateIndex(idx3),
+            "CREATE INDEX test_idx3 ON testtbl (x DESC)",
+        )
+
+    def test_create_index_expr_func(self):
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("data", Integer))
+        idx1 = Index("test_idx1", func.radians(tbl.c.data))
+
+        self.assert_compile(
+            schema.CreateIndex(idx1),
+            "CREATE INDEX test_idx1 ON testtbl ((radians(data)))",
+        )
+
+    def test_create_index_expr_func_unary(self):
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("data", Integer))
+        idx1 = Index("test_idx1", -tbl.c.data)
+
+        self.assert_compile(
+            schema.CreateIndex(idx1),
+            "CREATE INDEX test_idx1 ON testtbl ((-data))",
         )
 
     def test_deferrable_initially_kw_not_ignored(self):
@@ -351,22 +436,32 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         expr = literal("x", type_=String) + literal("y", type_=String)
         self.assert_compile(expr, "concat('x', 'y')", literal_binds=True)
 
-    def test_for_update(self):
+    def test_mariadb_for_update(self):
+        dialect = mysql.dialect()
+        dialect.server_version_info = (10, 1, 1, "MariaDB")
+
         table1 = table(
             "mytable", column("myid"), column("name"), column("description")
         )
 
         self.assert_compile(
-            table1.select(table1.c.myid == 7).with_for_update(),
+            table1.select(table1.c.myid == 7).with_for_update(of=table1),
             "SELECT mytable.myid, mytable.name, mytable.description "
-            "FROM mytable WHERE mytable.myid = %s FOR UPDATE",
+            "FROM mytable WHERE mytable.myid = %s "
+            "FOR UPDATE",
+            dialect=dialect,
         )
 
-        self.assert_compile(
-            table1.select(table1.c.myid == 7).with_for_update(read=True),
-            "SELECT mytable.myid, mytable.name, mytable.description "
-            "FROM mytable WHERE mytable.myid = %s LOCK IN SHARE MODE",
-        )
+        with testing.expect_warnings("SKIP LOCKED ignored on non-supporting"):
+            self.assert_compile(
+                table1.select(table1.c.myid == 7).with_for_update(
+                    skip_locked=True
+                ),
+                "SELECT mytable.myid, mytable.name, mytable.description "
+                "FROM mytable WHERE mytable.myid = %s "
+                "FOR UPDATE",
+                dialect=dialect,
+            )
 
     def test_delete_extra_froms(self):
         t1 = table("t1", column("c1"))
@@ -384,6 +479,28 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             q, "DELETE FROM a1 USING t1 AS a1, t2 WHERE a1.c1 = t2.c1"
         )
         self.assert_compile(sql.delete(a1), "DELETE FROM t1 AS a1")
+
+    @testing.combinations(
+        ("no_persisted", "", "ignore"),
+        ("persisted_none", "", None),
+        ("persisted_true", " STORED", True),
+        ("persisted_false", " VIRTUAL", False),
+        id_="iaa",
+    )
+    def test_column_computed(self, text, persisted):
+        m = MetaData()
+        kwargs = {"persisted": persisted} if persisted != "ignore" else {}
+        t = Table(
+            "t",
+            m,
+            Column("x", Integer),
+            Column("y", Integer, Computed("x + 2", **kwargs)),
+        )
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (x INTEGER, y INTEGER GENERATED "
+            "ALWAYS AS (x + 2)%s)" % text,
+        )
 
 
 class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -454,32 +571,32 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
             {"param_1": 10},
         )
 
-    def test_varchar_raise(self):
-        for type_ in (
-            String,
-            VARCHAR,
-            String(),
-            VARCHAR(),
-            NVARCHAR(),
-            Unicode,
-            Unicode(),
-        ):
-            type_ = sqltypes.to_instance(type_)
-            assert_raises_message(
-                exc.CompileError,
-                "VARCHAR requires a length on dialect mysql",
-                type_.compile,
-                dialect=mysql.dialect(),
-            )
+    @testing.combinations(
+        (String,),
+        (VARCHAR,),
+        (String(),),
+        (VARCHAR(),),
+        (NVARCHAR(),),
+        (Unicode,),
+        (Unicode(),),
+    )
+    def test_varchar_raise(self, type_):
+        type_ = sqltypes.to_instance(type_)
+        assert_raises_message(
+            exc.CompileError,
+            "VARCHAR requires a length on dialect mysql",
+            type_.compile,
+            dialect=mysql.dialect(),
+        )
 
-            t1 = Table("sometable", MetaData(), Column("somecolumn", type_))
-            assert_raises_message(
-                exc.CompileError,
-                r"\(in table 'sometable', column 'somecolumn'\)\: "
-                r"(?:N)?VARCHAR requires a length on dialect mysql",
-                schema.CreateTable(t1).compile,
-                dialect=mysql.dialect(),
-            )
+        t1 = Table("sometable", MetaData(), Column("somecolumn", type_))
+        assert_raises_message(
+            exc.CompileError,
+            r"\(in table 'sometable', column 'somecolumn'\)\: "
+            r"(?:N)?VARCHAR requires a length on dialect mysql",
+            schema.CreateTable(t1).compile,
+            dialect=mysql.dialect(),
+        )
 
     def test_update_limit(self):
         t = sql.table("t", sql.column("col1"), sql.column("col2"))
@@ -513,75 +630,73 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_sysdate(self):
         self.assert_compile(func.sysdate(), "SYSDATE()")
 
-    def test_cast(self):
+    m = mysql
+
+    @testing.combinations(
+        (Integer, "CAST(t.col AS SIGNED INTEGER)"),
+        (INT, "CAST(t.col AS SIGNED INTEGER)"),
+        (m.MSInteger, "CAST(t.col AS SIGNED INTEGER)"),
+        (m.MSInteger(unsigned=True), "CAST(t.col AS UNSIGNED INTEGER)"),
+        (SmallInteger, "CAST(t.col AS SIGNED INTEGER)"),
+        (m.MSSmallInteger, "CAST(t.col AS SIGNED INTEGER)"),
+        (m.MSTinyInteger, "CAST(t.col AS SIGNED INTEGER)"),
+        # 'SIGNED INTEGER' is a bigint, so this is ok.
+        (m.MSBigInteger, "CAST(t.col AS SIGNED INTEGER)"),
+        (m.MSBigInteger(unsigned=False), "CAST(t.col AS SIGNED INTEGER)"),
+        (m.MSBigInteger(unsigned=True), "CAST(t.col AS UNSIGNED INTEGER)"),
+        # this is kind of sucky.  thank you default arguments!
+        (NUMERIC, "CAST(t.col AS DECIMAL)"),
+        (DECIMAL, "CAST(t.col AS DECIMAL)"),
+        (Numeric, "CAST(t.col AS DECIMAL)"),
+        (m.MSNumeric, "CAST(t.col AS DECIMAL)"),
+        (m.MSDecimal, "CAST(t.col AS DECIMAL)"),
+        (TIMESTAMP, "CAST(t.col AS DATETIME)"),
+        (DATETIME, "CAST(t.col AS DATETIME)"),
+        (DATE, "CAST(t.col AS DATE)"),
+        (TIME, "CAST(t.col AS TIME)"),
+        (DateTime, "CAST(t.col AS DATETIME)"),
+        (Date, "CAST(t.col AS DATE)"),
+        (Time, "CAST(t.col AS TIME)"),
+        (DateTime, "CAST(t.col AS DATETIME)"),
+        (Date, "CAST(t.col AS DATE)"),
+        (m.MSTime, "CAST(t.col AS TIME)"),
+        (m.MSTimeStamp, "CAST(t.col AS DATETIME)"),
+        (String, "CAST(t.col AS CHAR)"),
+        (Unicode, "CAST(t.col AS CHAR)"),
+        (UnicodeText, "CAST(t.col AS CHAR)"),
+        (VARCHAR, "CAST(t.col AS CHAR)"),
+        (NCHAR, "CAST(t.col AS CHAR)"),
+        (CHAR, "CAST(t.col AS CHAR)"),
+        (m.CHAR(charset="utf8"), "CAST(t.col AS CHAR CHARACTER SET utf8)"),
+        (CLOB, "CAST(t.col AS CHAR)"),
+        (TEXT, "CAST(t.col AS CHAR)"),
+        (m.TEXT(charset="utf8"), "CAST(t.col AS CHAR CHARACTER SET utf8)"),
+        (String(32), "CAST(t.col AS CHAR(32))"),
+        (Unicode(32), "CAST(t.col AS CHAR(32))"),
+        (CHAR(32), "CAST(t.col AS CHAR(32))"),
+        (m.MSString, "CAST(t.col AS CHAR)"),
+        (m.MSText, "CAST(t.col AS CHAR)"),
+        (m.MSTinyText, "CAST(t.col AS CHAR)"),
+        (m.MSMediumText, "CAST(t.col AS CHAR)"),
+        (m.MSLongText, "CAST(t.col AS CHAR)"),
+        (m.MSNChar, "CAST(t.col AS CHAR)"),
+        (m.MSNVarChar, "CAST(t.col AS CHAR)"),
+        (LargeBinary, "CAST(t.col AS BINARY)"),
+        (BLOB, "CAST(t.col AS BINARY)"),
+        (m.MSBlob, "CAST(t.col AS BINARY)"),
+        (m.MSBlob(32), "CAST(t.col AS BINARY)"),
+        (m.MSTinyBlob, "CAST(t.col AS BINARY)"),
+        (m.MSMediumBlob, "CAST(t.col AS BINARY)"),
+        (m.MSLongBlob, "CAST(t.col AS BINARY)"),
+        (m.MSBinary, "CAST(t.col AS BINARY)"),
+        (m.MSBinary(32), "CAST(t.col AS BINARY)"),
+        (m.MSVarBinary, "CAST(t.col AS BINARY)"),
+        (m.MSVarBinary(32), "CAST(t.col AS BINARY)"),
+        (Interval, "CAST(t.col AS DATETIME)"),
+    )
+    def test_cast(self, type_, expected):
         t = sql.table("t", sql.column("col"))
-        m = mysql
-
-        specs = [
-            (Integer, "CAST(t.col AS SIGNED INTEGER)"),
-            (INT, "CAST(t.col AS SIGNED INTEGER)"),
-            (m.MSInteger, "CAST(t.col AS SIGNED INTEGER)"),
-            (m.MSInteger(unsigned=True), "CAST(t.col AS UNSIGNED INTEGER)"),
-            (SmallInteger, "CAST(t.col AS SIGNED INTEGER)"),
-            (m.MSSmallInteger, "CAST(t.col AS SIGNED INTEGER)"),
-            (m.MSTinyInteger, "CAST(t.col AS SIGNED INTEGER)"),
-            # 'SIGNED INTEGER' is a bigint, so this is ok.
-            (m.MSBigInteger, "CAST(t.col AS SIGNED INTEGER)"),
-            (m.MSBigInteger(unsigned=False), "CAST(t.col AS SIGNED INTEGER)"),
-            (m.MSBigInteger(unsigned=True), "CAST(t.col AS UNSIGNED INTEGER)"),
-            # this is kind of sucky.  thank you default arguments!
-            (NUMERIC, "CAST(t.col AS DECIMAL)"),
-            (DECIMAL, "CAST(t.col AS DECIMAL)"),
-            (Numeric, "CAST(t.col AS DECIMAL)"),
-            (m.MSNumeric, "CAST(t.col AS DECIMAL)"),
-            (m.MSDecimal, "CAST(t.col AS DECIMAL)"),
-            (TIMESTAMP, "CAST(t.col AS DATETIME)"),
-            (DATETIME, "CAST(t.col AS DATETIME)"),
-            (DATE, "CAST(t.col AS DATE)"),
-            (TIME, "CAST(t.col AS TIME)"),
-            (DateTime, "CAST(t.col AS DATETIME)"),
-            (Date, "CAST(t.col AS DATE)"),
-            (Time, "CAST(t.col AS TIME)"),
-            (DateTime, "CAST(t.col AS DATETIME)"),
-            (Date, "CAST(t.col AS DATE)"),
-            (m.MSTime, "CAST(t.col AS TIME)"),
-            (m.MSTimeStamp, "CAST(t.col AS DATETIME)"),
-            (String, "CAST(t.col AS CHAR)"),
-            (Unicode, "CAST(t.col AS CHAR)"),
-            (UnicodeText, "CAST(t.col AS CHAR)"),
-            (VARCHAR, "CAST(t.col AS CHAR)"),
-            (NCHAR, "CAST(t.col AS CHAR)"),
-            (CHAR, "CAST(t.col AS CHAR)"),
-            (m.CHAR(charset="utf8"), "CAST(t.col AS CHAR CHARACTER SET utf8)"),
-            (CLOB, "CAST(t.col AS CHAR)"),
-            (TEXT, "CAST(t.col AS CHAR)"),
-            (m.TEXT(charset="utf8"), "CAST(t.col AS CHAR CHARACTER SET utf8)"),
-            (String(32), "CAST(t.col AS CHAR(32))"),
-            (Unicode(32), "CAST(t.col AS CHAR(32))"),
-            (CHAR(32), "CAST(t.col AS CHAR(32))"),
-            (m.MSString, "CAST(t.col AS CHAR)"),
-            (m.MSText, "CAST(t.col AS CHAR)"),
-            (m.MSTinyText, "CAST(t.col AS CHAR)"),
-            (m.MSMediumText, "CAST(t.col AS CHAR)"),
-            (m.MSLongText, "CAST(t.col AS CHAR)"),
-            (m.MSNChar, "CAST(t.col AS CHAR)"),
-            (m.MSNVarChar, "CAST(t.col AS CHAR)"),
-            (LargeBinary, "CAST(t.col AS BINARY)"),
-            (BLOB, "CAST(t.col AS BINARY)"),
-            (m.MSBlob, "CAST(t.col AS BINARY)"),
-            (m.MSBlob(32), "CAST(t.col AS BINARY)"),
-            (m.MSTinyBlob, "CAST(t.col AS BINARY)"),
-            (m.MSMediumBlob, "CAST(t.col AS BINARY)"),
-            (m.MSLongBlob, "CAST(t.col AS BINARY)"),
-            (m.MSBinary, "CAST(t.col AS BINARY)"),
-            (m.MSBinary(32), "CAST(t.col AS BINARY)"),
-            (m.MSVarBinary, "CAST(t.col AS BINARY)"),
-            (m.MSVarBinary(32), "CAST(t.col AS BINARY)"),
-            (Interval, "CAST(t.col AS DATETIME)"),
-        ]
-
-        for type_, expected in specs:
-            self.assert_compile(cast(t.c.col, type_), expected)
+        self.assert_compile(cast(t.c.col, type_), expected)
 
     def test_cast_type_decorator(self):
         class MyInteger(sqltypes.TypeDecorator):
@@ -603,7 +718,9 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_unsupported_cast_literal_bind(self):
         expr = cast(column("foo", Integer) + 5, Float)
 
-        with expect_warnings("Datatype FLOAT does not support CAST on MySQL;"):
+        with expect_warnings(
+            "Datatype FLOAT does not support CAST on MySQL/MariaDb;"
+        ):
             self.assert_compile(expr, "(foo + 5)", literal_binds=True)
 
         dialect = mysql.MySQLDialect()
@@ -618,33 +735,50 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
                 "(foo + 5)",
             )
 
-    def test_unsupported_casts(self):
+    m = mysql
+
+    @testing.combinations(
+        (m.MSBit, "t.col"),
+        (FLOAT, "t.col"),
+        (Float, "t.col"),
+        (m.MSFloat, "t.col"),
+        (m.MSDouble, "t.col"),
+        (m.MSReal, "t.col"),
+        (m.MSYear, "t.col"),
+        (m.MSYear(2), "t.col"),
+        (Boolean, "t.col"),
+        (BOOLEAN, "t.col"),
+        (m.MSEnum, "t.col"),
+        (m.MSEnum("1", "2"), "t.col"),
+        (m.MSSet, "t.col"),
+        (m.MSSet("1", "2"), "t.col"),
+    )
+    def test_unsupported_casts(self, type_, expected):
 
         t = sql.table("t", sql.column("col"))
-        m = mysql
+        with expect_warnings(
+            "Datatype .* does not support CAST on MySQL/MariaDb;"
+        ):
+            self.assert_compile(cast(t.c.col, type_), expected)
 
-        specs = [
-            (m.MSBit, "t.col"),
-            (FLOAT, "t.col"),
-            (Float, "t.col"),
-            (m.MSFloat, "t.col"),
-            (m.MSDouble, "t.col"),
-            (m.MSReal, "t.col"),
-            (m.MSYear, "t.col"),
-            (m.MSYear(2), "t.col"),
-            (Boolean, "t.col"),
-            (BOOLEAN, "t.col"),
-            (m.MSEnum, "t.col"),
-            (m.MSEnum("1", "2"), "t.col"),
-            (m.MSSet, "t.col"),
-            (m.MSSet("1", "2"), "t.col"),
-        ]
+    @testing.combinations(
+        (m.FLOAT, "CAST(t.col AS FLOAT)"),
+        (Float, "CAST(t.col AS FLOAT)"),
+        (FLOAT, "CAST(t.col AS FLOAT)"),
+        (m.DOUBLE, "CAST(t.col AS DOUBLE)"),
+        (m.FLOAT, "CAST(t.col AS FLOAT)"),
+        argnames="type_,expected",
+    )
+    @testing.combinations(True, False, argnames="maria_db")
+    def test_float_cast(self, type_, expected, maria_db):
 
-        for type_, expected in specs:
-            with expect_warnings(
-                "Datatype .* does not support CAST on MySQL;"
-            ):
-                self.assert_compile(cast(t.c.col, type_), expected)
+        dialect = mysql.dialect()
+        if maria_db:
+            dialect.server_version_info = (10, 4, 5, "MariaDB")
+        else:
+            dialect.server_version_info = (8, 0, 17)
+        t = sql.table("t", sql.column("col"))
+        self.assert_compile(cast(t.c.col, type_), expected, dialect=dialect)
 
     def test_no_cast_pre_4(self):
         self.assert_compile(
@@ -658,7 +792,9 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
             )
 
     def test_cast_grouped_expression_non_castable(self):
-        with expect_warnings("Datatype FLOAT does not support CAST on MySQL;"):
+        with expect_warnings(
+            "Datatype FLOAT does not support CAST on MySQL/MariaDb;"
+        ):
             self.assert_compile(
                 cast(sql.column("x") + sql.column("y"), Float), "(x + y)"
             )
@@ -837,6 +973,34 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
             ")STATS_SAMPLE_PAGES=2 PARTITION BY HASH(other_id) PARTITIONS 2",
         )
 
+    def test_create_table_with_collate(self):
+        # issue #5411
+        t1 = Table(
+            "testtable",
+            MetaData(),
+            Column("id", Integer(), primary_key=True, autoincrement=True),
+            mysql_engine="InnoDB",
+            mysql_collate="utf8_icelandic_ci",
+            mysql_charset="utf8",
+        )
+        first_part = (
+            "CREATE TABLE testtable ("
+            "id INTEGER NOT NULL AUTO_INCREMENT, "
+            "PRIMARY KEY (id))"
+        )
+        try:
+            self.assert_compile(
+                schema.CreateTable(t1),
+                first_part
+                + "ENGINE=InnoDB CHARSET=utf8 COLLATE utf8_icelandic_ci",
+            )
+        except AssertionError:
+            self.assert_compile(
+                schema.CreateTable(t1),
+                first_part
+                + "CHARSET=utf8 ENGINE=InnoDB COLLATE utf8_icelandic_ci",
+            )
+
     def test_inner_join(self):
         t1 = table("t1", column("x"))
         t2 = table("t2", column("y"))
@@ -910,3 +1074,28 @@ class InsertOnDuplicateTest(fixtures.TestBase, AssertsCompiledSQL):
             "ON DUPLICATE KEY UPDATE bar = %s"
         )
         self.assert_compile(stmt, expected_sql)
+
+    def test_update_sql_expr(self):
+        stmt = insert(self.table).values(
+            [{"id": 1, "bar": "ab"}, {"id": 2, "bar": "b"}]
+        )
+        stmt = stmt.on_duplicate_key_update(
+            bar=func.coalesce(stmt.inserted.bar),
+            baz=stmt.inserted.baz + "some literal",
+        )
+        expected_sql = (
+            "INSERT INTO foos (id, bar) VALUES (%s, %s), (%s, %s) ON "
+            "DUPLICATE KEY UPDATE bar = coalesce(VALUES(bar)), "
+            "baz = (concat(VALUES(baz), %s))"
+        )
+        self.assert_compile(
+            stmt,
+            expected_sql,
+            checkparams={
+                "id_m0": 1,
+                "bar_m0": "ab",
+                "id_m1": 2,
+                "bar_m1": "b",
+                "baz_1": "some literal",
+            },
+        )

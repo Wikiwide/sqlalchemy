@@ -3,6 +3,7 @@ from sqlalchemy import bindparam
 from sqlalchemy import ForeignKey
 from sqlalchemy import inspect
 from sqlalchemy import Integer
+from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
@@ -23,7 +24,7 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.entities import ComparableEntity
@@ -432,7 +433,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
     def test_orderby_related(self):
         """A regular mapper select on a single table can
-            order by a relationship to a second table"""
+        order by a relationship to a second table"""
 
         Address, addresses, users, User = (
             self.classes.Address,
@@ -792,7 +793,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         sess = create_session()
 
         self.assert_compile(
-            sess.query(User, "1"),
+            sess.query(User, literal_column("1")),
             "SELECT users.id AS users_id, users.name AS users_name, "
             "1 FROM users",
         )
@@ -1112,6 +1113,45 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         result = q.order_by(sa.desc(User.id)).limit(2).offset(2).all()
         eq_(list(reversed(self.static.user_all_result[0:2])), result)
 
+    def test_group_by_only(self):
+        # test group_by() not impacting results, similarly to joinedload
+        users, Address, addresses, User = (
+            self.tables.users,
+            self.classes.Address,
+            self.tables.addresses,
+            self.classes.User,
+        )
+
+        mapper(
+            User,
+            users,
+            properties={
+                "addresses": relationship(
+                    mapper(Address, addresses),
+                    lazy="subquery",
+                    order_by=addresses.c.email_address,
+                )
+            },
+        )
+
+        q = create_session().query(User)
+        eq_(
+            [
+                User(id=7, addresses=[Address(id=1)]),
+                User(
+                    id=8,
+                    addresses=[
+                        Address(id=3, email_address="ed@bettyboop.com"),
+                        Address(id=4, email_address="ed@lala.com"),
+                        Address(id=2, email_address="ed@wood.com"),
+                    ],
+                ),
+                User(id=9, addresses=[Address(id=5)]),
+                User(id=10, addresses=[]),
+            ],
+            q.order_by(User.id).group_by(User).all(),  # group by all columns
+        )
+
     def test_one_to_many_scalar(self):
         Address, addresses, users, User = (
             self.classes.Address,
@@ -1157,7 +1197,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
         def go():
             a = q.filter(addresses.c.id == 1).one()
-            is_not_(a.user, None)
+            is_not(a.user, None)
             u1 = sess.query(User).get(7)
             is_(a.user, u1)
 
@@ -1593,7 +1633,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
         mapper(Page, pages)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
 
         e1 = Engineer(primary_language="java")
         e2 = Engineer(primary_language="c++")
@@ -1614,7 +1654,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
             ),
         ]
         e2.paperwork = [Paperwork(description="tps report #3")]
-        sess = create_session()
+        sess = create_session(connection)
         sess.add_all([e1, e2])
         sess.flush()
 
@@ -1666,7 +1706,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 ":primary_language_1) AS anon_1 "
                 "JOIN paperwork "
                 "ON anon_1.people_person_id = paperwork.person_id "
-                "ORDER BY anon_1.people_person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 {"primary_language_1": "java"},
             ),
         )
@@ -1723,7 +1763,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.description = :description_1) AS anon_1 "
                 "JOIN paperwork ON anon_1.people_person_id = "
                 "paperwork.person_id "
-                "ORDER BY anon_1.people_person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 {
                     "primary_language_1": "java",
                     "description_1": "tps report #2",
@@ -1788,7 +1828,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "WHERE engineers.primary_language = :primary_language_1) "
                 "AS anon_1 JOIN paperwork "
                 "ON anon_1.people_person_id = paperwork.person_id "
-                "ORDER BY anon_1.people_person_id, paperwork.paperwork_id",
+                "ORDER BY paperwork.paperwork_id",
                 {"primary_language_1": "java"},
             ),
             CompiledSQL(
@@ -1803,7 +1843,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "AS anon_1 JOIN paperwork AS paperwork_1 "
                 "ON anon_1.people_person_id = paperwork_1.person_id "
                 "JOIN pages ON paperwork_1.paperwork_id = pages.paperwork_id "
-                "ORDER BY paperwork_1.paperwork_id, pages.page_id",
+                "ORDER BY pages.page_id",
                 {"primary_language_1": "java"},
             ),
         )
@@ -1853,7 +1893,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "engineers.engineer_id ORDER BY engineers.primary_language "
                 "DESC LIMIT :param_1) AS anon_1 JOIN paperwork "
                 "ON anon_1.people_person_id = paperwork.person_id "
-                "ORDER BY anon_1.people_person_id, paperwork.paperwork_id"
+                "ORDER BY paperwork.paperwork_id"
             ),
         )
 
@@ -1920,8 +1960,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "DESC LIMIT :param_1) AS anon_1 "
                 "JOIN paperwork "
                 "ON anon_1.anon_2_people_person_id = paperwork.person_id "
-                "ORDER BY anon_1.anon_2_people_person_id, "
-                "paperwork.paperwork_id"
+                "ORDER BY paperwork.paperwork_id"
             ),
         )
 
@@ -1973,8 +2012,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "ON people_1.person_id = engineers_1.engineer_id "
                 "ORDER BY engineers_1.primary_language DESC LIMIT :param_1) "
                 "AS anon_1 JOIN paperwork ON anon_1.people_1_person_id = "
-                "paperwork.person_id ORDER BY anon_1.people_1_person_id, "
-                "paperwork.paperwork_id"
+                "paperwork.person_id ORDER BY paperwork.paperwork_id"
             ),
         )
 
@@ -2086,9 +2124,9 @@ class SubRelationFromJoinedSubclassMultiLevelTest(_Polymorphic):
         mapper(MachineType, machine_type)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         c1 = cls._fixture()
-        sess = create_session()
+        sess = create_session(connection)
         sess.add(c1)
         sess.flush()
 
@@ -2672,8 +2710,7 @@ class CyclicalInheritingEagerTestTwo(
             "ON persistent.id = director.id) AS anon_1 "
             "JOIN (persistent JOIN movie "
             "ON persistent.id = movie.id) "
-            "ON anon_1.director_id = movie.director_id "
-            "ORDER BY anon_1.director_id",
+            "ON anon_1.director_id = movie.director_id",
             dialect="default",
         )
 
@@ -2741,7 +2778,7 @@ class SubqueryloadDistinctTest(
             movie_id = Column(Integer, ForeignKey("movie.id"))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Movie = cls.classes.Movie
         Director = cls.classes.Director
         DirectorPhoto = cls.classes.DirectorPhoto
@@ -2753,7 +2790,7 @@ class SubqueryloadDistinctTest(
             Movie(title="Manhattan", credits=[Credit(), Credit()]),
             Movie(title="Sweet and Lowdown", credits=[Credit()]),
         ]
-        sess = create_session()
+        sess = create_session(connection)
         sess.add_all([d])
         sess.flush()
 
@@ -2798,8 +2835,7 @@ class SubqueryloadDistinctTest(
             "anon_1.movie_director_id AS anon_1_movie_director_id "
             "FROM (SELECT%s movie.director_id AS movie_director_id "
             "FROM movie) AS anon_1 "
-            "JOIN director ON director.id = anon_1.movie_director_id "
-            "ORDER BY anon_1.movie_director_id"
+            "JOIN director ON director.id = anon_1.movie_director_id"
             % (" DISTINCT" if expect_distinct else ""),
         )
 
@@ -2827,8 +2863,7 @@ class SubqueryloadDistinctTest(
             "JOIN director AS director_1 "
             "ON director_1.id = anon_1.movie_director_id "
             "JOIN director_photo "
-            "ON director_1.id = director_photo.director_id "
-            "ORDER BY director_1.id"
+            "ON director_1.id = director_photo.director_id"
             % (" DISTINCT" if expect_distinct else ""),
         )
         result = s.execute(q3)
@@ -2919,11 +2954,11 @@ class JoinedNoLoadConflictTest(fixtures.DeclarativeMappedTest):
             )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Parent = cls.classes.Parent
         Child = cls.classes.Child
 
-        s = Session()
+        s = Session(connection)
         s.add(Parent(name="parent", children=[Child(name="c1")]))
         s.commit()
 
@@ -2969,10 +3004,10 @@ class SelfRefInheritanceAliasedTest(
             __mapper_args__ = {"polymorphic_identity": "bar"}
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Foo, Bar = cls.classes("Foo", "Bar")
 
-        session = Session()
+        session = Session(connection)
         target = Bar(id=1)
         b1 = Bar(id=2, foo=Foo(id=3, foo=target))
         session.add(b1)
@@ -3006,8 +3041,7 @@ class SelfRefInheritanceAliasedTest(
                 "anon_1.foo_foo_id AS anon_1_foo_foo_id "
                 "FROM (SELECT DISTINCT foo.foo_id AS foo_foo_id "
                 "FROM foo WHERE foo.id = :id_1) AS anon_1 "
-                "JOIN foo AS foo_1 ON foo_1.id = anon_1.foo_foo_id "
-                "ORDER BY anon_1.foo_foo_id",
+                "JOIN foo AS foo_1 ON foo_1.id = anon_1.foo_foo_id",
                 {"id_1": 2},
             ),
             CompiledSQL(
@@ -3016,7 +3050,7 @@ class SelfRefInheritanceAliasedTest(
                 "FROM (SELECT DISTINCT foo.foo_id AS foo_foo_id FROM foo "
                 "WHERE foo.id = :id_1) AS anon_1 "
                 "JOIN foo AS foo_1 ON foo_1.id = anon_1.foo_foo_id "
-                "JOIN foo ON foo.id = foo_1.foo_id ORDER BY foo_1.foo_id",
+                "JOIN foo ON foo.id = foo_1.foo_id",
                 {"id_1": 2},
             ),
         )
@@ -3079,12 +3113,12 @@ class TestExistingRowPopulation(fixtures.DeclarativeMappedTest):
             id = Column(Integer, primary_key=True)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, A2, B, C1o2m, C2o2m, C1m2o, C2m2o = cls.classes(
             "A", "A2", "B", "C1o2m", "C2o2m", "C1m2o", "C2m2o"
         )
 
-        s = Session()
+        s = Session(connection)
 
         b = B(
             c1_o2m=[C1o2m()], c2_o2m=[C2o2m()], c1_m2o=C1m2o(), c2_m2o=C2m2o()

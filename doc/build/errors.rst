@@ -51,7 +51,7 @@ familiar with.
 
 * **The SQLAlchemy Engine object uses a pool of connections by default** - What
   this means is that when one makes use of a SQL database connection resource
-  of an :class:`.Engine` object, and then :term:`releases` that resource,
+  of an :class:`_engine.Engine` object, and then :term:`releases` that resource,
   the database connection itself remains connected to the database and
   is returned to an internal queue where it can be used again.  Even though
   the code may appear to be ending its conversation with the database, in many
@@ -59,7 +59,7 @@ familiar with.
   that persist until the application ends or the pool is explicitly disposed.
 
 * Because of the pool, when an application makes use of a SQL database
-  connection, most typically from either making use of :meth:`.Engine.connect`
+  connection, most typically from either making use of :meth:`_engine.Engine.connect`
   or when making queries using an ORM :class:`.Session`, this activity
   does not necessarily establish a new connection to the database at the
   moment the connection object is acquired; it instead consults the
@@ -77,7 +77,7 @@ familiar with.
 
    engine = create_engine("mysql://u:p@host/db", pool_size=10, max_overflow=20)
 
-  The above :class:`.Engine` will allow **at most 30 connections** to be in
+  The above :class:`_engine.Engine` will allow **at most 30 connections** to be in
   play at any time, not including connections that were detached from the
   engine or invalidated.  If a request for a new connection arrives and
   30 connections are already in use by other parts of the application,
@@ -86,13 +86,13 @@ familiar with.
 
   In order to allow for a higher number of connections be in use at once,
   the pool can be adjusted using the
-  :paramref:`.create_engine.pool_size` and :paramref:`.create_engine.max_overflow`
-  parameters as passed to the :func:`.create_engine` function.      The timeout
+  :paramref:`_sa.create_engine.pool_size` and :paramref:`_sa.create_engine.max_overflow`
+  parameters as passed to the :func:`_sa.create_engine` function.      The timeout
   to wait for a connection to be available is configured using the
-  :paramref:`.create_engine.pool_timeout` parameter.
+  :paramref:`_sa.create_engine.pool_timeout` parameter.
 
 * The pool can be configured to have unlimited overflow by setting
-  :paramref:`.create_engine.max_overflow` to the value "-1".  With this setting,
+  :paramref:`_sa.create_engine.max_overflow` to the value "-1".  With this setting,
   the pool will still maintain a fixed pool of connections, however it will
   never block upon a new connection being requested; it will instead unconditionally
   make a new connection if none are available.
@@ -137,7 +137,7 @@ What causes an application to use up all the connections that it has available?
   A common reason this can occur is that the application uses ORM sessions and
   does not call :meth:`.Session.close` upon them one the work involving that
   session is complete. Solution is to make sure ORM sessions if using the ORM,
-  or engine-bound :class:`.Connection` objects if using Core, are explicitly
+  or engine-bound :class:`_engine.Connection` objects if using Core, are explicitly
   closed at the end of the work being done, either via the appropriate
   ``.close()`` method, or by using one of the available context managers (e.g.
   "with:" statement) to properly release the resource.
@@ -333,7 +333,7 @@ kinds of SQL compiler classes will be named, such as ``SQLCompiler`` or
 more specific to the "stringification" use case but describes the general
 background as well.
 
-Normally, a Core SQL construct or ORM :class:`.Query` object can be stringified
+Normally, a Core SQL construct or ORM :class:`_query.Query` object can be stringified
 directly, such as when we use ``print()``::
 
   >>> from sqlalchemy import column
@@ -367,15 +367,15 @@ to turn into a string, such as the PostgreSQL
   <class 'sqlalchemy.dialects.postgresql.dml.OnConflictDoNothing'>
 
 In order to stringify constructs that are specific to particular backend,
-the :meth:`.ClauseElement.compile` method must be used, passing either an
-:class:`.Engine` or a :class:`.Dialect` object which will invoke the correct
+the :meth:`_expression.ClauseElement.compile` method must be used, passing either an
+:class:`_engine.Engine` or a :class:`.Dialect` object which will invoke the correct
 compiler.   Below we use a PostgreSQL dialect::
 
   >>> from sqlalchemy.dialects import postgresql
   >>> print(insert_stmt.compile(dialect=postgresql.dialect()))
   INSERT INTO my_table (x) VALUES (%(x)s) ON CONFLICT (y) DO NOTHING
 
-For an ORM :class:`.Query` object, the statement can be accessed using the
+For an ORM :class:`_query.Query` object, the statement can be accessed using the
 :attr:`~.orm.query.Query.statement` accessor::
 
     statement = query.statement
@@ -407,10 +407,10 @@ declarative such as::
         )
 
 Above, the ``cprop`` attribute is used inline before it has been mapped,
-however this ``cprop`` attribute is not a :class:`.Column`,
+however this ``cprop`` attribute is not a :class:`_schema.Column`,
 it's a :class:`.ColumnProperty`, which is an interim object and therefore
-does not have the full functionality of either the :class:`.Column` object
-or the :class:`.InstrmentedAttribute` object that will be mapped onto the
+does not have the full functionality of either the :class:`_schema.Column` object
+or the :class:`.InstrumentedAttribute` object that will be mapped onto the
 ``Bar`` class once the declarative process is complete.
 
 While the :class:`.ColumnProperty` does have a ``__clause_element__()`` method,
@@ -419,7 +419,7 @@ open-ended comparison context as illustrated above, since it has no Python
 ``__eq__()`` method that would allow it to interpret the comparison to the
 number "5" as a SQL expression and not a regular Python comparison.
 
-The solution is to access the :class:`.Column` directly using the
+The solution is to access the :class:`_schema.Column` directly using the
 :attr:`.ColumnProperty.expression` attribute::
 
     class Bar(Base):
@@ -441,7 +441,7 @@ This Compiled object is not bound to any Engine or Connection
 This error refers to the concept of "bound metadata", described at
 :ref:`dbengine_implicit`.   The issue occurs when one invokes the
 :meth:`.Executable.execute` method directly off of a Core expression object
-that is not associated with any :class:`.Engine`::
+that is not associated with any :class:`_engine.Engine`::
 
  metadata = MetaData()
  table = Table('t', metadata, Column('q', Integer))
@@ -449,26 +449,26 @@ that is not associated with any :class:`.Engine`::
  stmt = select([table])
  result = stmt.execute()   # <--- raises
 
-What the logic is expecting is that the :class:`.MetaData` object has
-been **bound** to a :class:`.Engine`::
+What the logic is expecting is that the :class:`_schema.MetaData` object has
+been **bound** to a :class:`_engine.Engine`::
 
  engine = create_engine("mysql+pymysql://user:pass@host/db")
  metadata = MetaData(bind=engine)
 
-Where above, any statement that derives from a :class:`.Table` which
-in turn derives from that :class:`.MetaData` will implicitly make use of
-the given :class:`.Engine` in order to invoke the statement.
+Where above, any statement that derives from a :class:`_schema.Table` which
+in turn derives from that :class:`_schema.MetaData` will implicitly make use of
+the given :class:`_engine.Engine` in order to invoke the statement.
 
 Note that the concept of bound metadata is a **legacy pattern** and in most
 cases is **highly discouraged**.   The best way to invoke the statement is
-to pass it to the :meth:`.Connection.execute` method of a :class:`.Connection`::
+to pass it to the :meth:`_engine.Connection.execute` method of a :class:`_engine.Connection`::
 
  with engine.connect() as conn:
    result = conn.execute(stmt)
 
 When using the ORM, a similar facility is available via the :class:`.Session`::
 
- result = session.exxecute(stmt)
+ result = session.execute(stmt)
 
 .. seealso::
 
@@ -596,14 +596,24 @@ Mitigation of this error is via two general techniques:
   to pass objects off to other systems that can't run in the same context
   even though they're in the same process.  In this case, the application
   should try to make appropriate use of :term:`eager loading` to ensure
-  that objects have what they need up front.   As an additional measure,
-  special directives like the :func:`.raiseload` option can ensure that
-  systems don't call upon lazy loading when its not expected.
+  that objects have what they need up front.
+
+  When using this approach, it is usually necessary that the
+  :paramref:`_orm.Session.expire_on_commit` parameter be set to ``False``, so
+  that after a :meth:`_orm.Session.commit` operation, the objects within the
+  session aren't :term:`expired`, which would incur a lazy load if their
+  attributes were subsequently accessed.  Additionally, the
+  :meth:`_orm.Session.rollback` method unconditionally expires all contents in
+  the :class:`_orm.Session` and should also be avoided in non-error scenarios.
 
   .. seealso::
 
     :ref:`loading_toplevel` - detailed documentation on eager loading and other
     relationship-oriented loading techniques
+
+    :ref:`session_committing` - background on session commit
+
+    :ref:`session_expire` - background on attribute expiry
 
 
 .. _error_7s2a:
@@ -623,7 +633,228 @@ application that doesn't yet have correct "framing" around its
 :class:`.Session` operations. Further detail is described in the FAQ at
 :ref:`faq_session_rollback`.
 
+.. _error_bbf0:
 
+For relationship <relationship>, delete-orphan cascade is normally configured only on the "one" side of a one-to-many relationship, and not on the "many" side of a many-to-one or many-to-many relationship.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+This error arises when the "delete-orphan" :ref:`cascade <unitofwork_cascades>`
+is set on a many-to-one or many-to-many relationship, such as::
+
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id = Column(Integer, primary_key=True)
+
+        bs = relationship("B", back_populates="a")
+
+
+    class B(Base):
+        __tablename__ = "b"
+        id = Column(Integer, primary_key=True)
+        a_id = Column(ForeignKey("a.id"))
+
+        # this will emit the error message when the mapper
+        # configuration step occurs
+        a = relationship("A", back_populates="bs", cascade="all, delete-orphan")
+
+    configure_mappers()
+
+Above, the "delete-orphan" setting on ``B.a`` indicates the intent that
+when every ``B`` object that refers to a particular ``A`` is deleted, that the
+``A`` should then be deleted as well.   That is, it expresses that the "orphan"
+which is being deleted would be an ``A`` object, and it becomes an "orphan"
+when every ``B`` that refers to it is deleted.
+
+The "delete-orphan" cascade model does not support this functionality.   The
+"orphan" consideration is only made in terms of the deletion of a single object
+which would then refer to zero or more objects that are now "orphaned" by
+this single deletion, which would result in those objects being deleted as
+well.  In other words, it is designed only to track the creation of "orphans"
+based on the removal of one and only one "parent" object per orphan,  which is
+the natural case in a one-to-many relationship where a deletion of the
+object on the "one" side results in the subsequent deletion of the related
+items on the "many" side.
+
+The above mapping in support of this functionality would instead place the
+cascade setting on the one-to-many side, which looks like::
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id = Column(Integer, primary_key=True)
+
+        bs = relationship("B", back_populates="a", cascade="all, delete-orphan")
+
+
+    class B(Base):
+        __tablename__ = "b"
+        id = Column(Integer, primary_key=True)
+        a_id = Column(ForeignKey("a.id"))
+
+        a = relationship("A", back_populates="bs")
+
+Where the intent is expressed that when an ``A`` is deleted, all of the
+``B`` objects to which it refers are also deleted.
+
+The error message then goes on to suggest the usage of the
+:paramref:`_orm.relationship.single_parent` flag.    This flag may be used
+to enforce that a relationship which is capable of having many objects
+refer to a particular object will in fact have only **one** object referring
+to it at a time.   It is used for legacy or other less ideal
+database schemas where the foreign key relationships suggest a "many"
+collection, however in practice only one object would actually refer
+to a given target object at at time.  This uncommon scenario
+can be demonstrated in terms of the above example as follows::
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id = Column(Integer, primary_key=True)
+
+        bs = relationship("B", back_populates="a")
+
+
+    class B(Base):
+        __tablename__ = "b"
+        id = Column(Integer, primary_key=True)
+        a_id = Column(ForeignKey("a.id"))
+
+        a = relationship(
+            "A",
+            back_populates="bs",
+            single_parent=True,
+            cascade="all, delete-orphan",
+        )
+
+The above configuration will then install a validator which will enforce
+that only one ``B`` may be associated with an ``A`` at at time, within
+the scope of the ``B.a`` relationship::
+
+    >>> b1 = B()
+    >>> b2 = B()
+    >>> a1 = A()
+    >>> b1.a = a1
+    >>> b2.a = a1
+    sqlalchemy.exc.InvalidRequestError: Instance <A at 0x7eff44359350> is
+    already associated with an instance of <class '__main__.B'> via its
+    B.a attribute, and is only allowed a single parent.
+
+Note that this validator is of limited scope and will not prevent multiple
+"parents" from being created via the other direction.  For example, it will
+not detect the same setting in terms of ``A.bs``:
+
+.. sourcecode:: pycon+sql
+
+    >>> a1.bs = [b1, b2]
+    >>> session.add_all([a1, b1, b2])
+    >>> session.commit()
+    {opensql}
+    INSERT INTO a DEFAULT VALUES
+    ()
+    INSERT INTO b (a_id) VALUES (?)
+    (1,)
+    INSERT INTO b (a_id) VALUES (?)
+    (1,)
+
+However, things will not go as expected later on, as the "delete-orphan" cascade
+will continue to work in terms of a **single** lead object, meaning if we
+delete **either** of the ``B`` objects, the ``A`` is deleted.   The other ``B`` stays
+around, where the ORM will usually be smart enough to set the foreign key attribute
+to NULL, but this is usually not what's desired:
+
+.. sourcecode:: pycon+sql
+
+    >>> session.delete(b1)
+    >>> session.commit()
+    {opensql}
+    UPDATE b SET a_id=? WHERE b.id = ?
+    (None, 2)
+    DELETE FROM b WHERE b.id = ?
+    (1,)
+    DELETE FROM a WHERE a.id = ?
+    (1,)
+    COMMIT
+
+For all the above examples, similar logic applies to the calculus of a
+many-to-many relationship; if a many-to-many relationship sets single_parent=True
+on one side, that side can use the "delete-orphan" cascade, however this is
+very unlikely to be what someone actually wants as the point of a many-to-many
+relationship is so that there can be many objects referring to an object
+in either direction.
+
+Overall, "delete-orphan" cascade is usually applied
+on the "one" side of a one-to-many relationship so that it deletes objects
+in the "many" side, and not the other way around.
+
+.. versionchanged:: 1.3.18  The text of the "delete-orphan" error message
+   when used on a many-to-one or many-to-many relationship has been updated
+   to be more descriptive.
+
+
+.. seealso::
+
+    :ref:`unitofwork_cascades`
+
+    :ref:`cascade_delete_orphan`
+
+    :ref:`error_bbf1`
+
+
+
+.. _error_bbf1:
+
+Instance <instance> is already associated with an instance of <instance> via its <attribute> attribute, and is only allowed a single parent.
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+
+This error is emitted when the :paramref:`_orm.relationship.single_parent` flag
+is used, and more than one object is assigned as the "parent" of an object at
+once.
+
+Given the following mapping::
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id = Column(Integer, primary_key=True)
+
+
+    class B(Base):
+        __tablename__ = "b"
+        id = Column(Integer, primary_key=True)
+        a_id = Column(ForeignKey("a.id"))
+
+        a = relationship(
+            "A",
+            single_parent=True,
+            cascade="all, delete-orphan",
+        )
+
+The intent indicates that no more than a single ``B`` object may refer
+to a particular ``A`` object at once::
+
+    >>> b1 = B()
+    >>> b2 = B()
+    >>> a1 = A()
+    >>> b1.a = a1
+    >>> b2.a = a1
+    sqlalchemy.exc.InvalidRequestError: Instance <A at 0x7eff44359350> is
+    already associated with an instance of <class '__main__.B'> via its
+    B.a attribute, and is only allowed a single parent.
+
+When this error occurs unexpectedly, it is usually because the
+:paramref:`_orm.relationship.single_parent` flag was applied in response
+to the error message described at :ref:`error_bbf0`, and the issue is in
+fact a misunderstanding of the "delete-orphan" cascade setting.  See that
+message for details.
+
+
+.. seealso::
+
+    :ref:`error_bbf0`
 
 Core Exception Classes
 ======================

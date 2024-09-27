@@ -1,7 +1,9 @@
 # coding: utf-8
 
+import re
 
 from sqlalchemy import bindparam
+from sqlalchemy import Computed
 from sqlalchemy import create_engine
 from sqlalchemy import exc
 from sqlalchemy import Float
@@ -22,6 +24,7 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
+from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import mock
@@ -29,6 +32,7 @@ from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.util import u
+from sqlalchemy.util import ue
 
 
 class DialectTest(fixtures.TestBase):
@@ -60,6 +64,328 @@ class DialectTest(fixtures.TestBase):
             lambda self, vers: (5, 3, 1),
         ):
             cx_oracle.OracleDialect_cx_oracle(dbapi=Mock())
+
+
+class DialectWBackendTest(fixtures.TestBase):
+    __backend__ = True
+    __only_on__ = "oracle"
+
+    def test_hypothetical_not_implemented_isolation_level(self):
+        engine = engines.testing_engine()
+
+        def get_isolation_level(connection):
+            raise NotImplementedError
+
+        with mock.patch.object(
+            engine.dialect, "get_isolation_level", get_isolation_level
+        ):
+            conn = engine.connect()
+
+            # for NotImplementedError we get back None.  But the
+            # cx_Oracle dialect does not raise this.
+            eq_(conn.dialect.default_isolation_level, None)
+
+            dbapi_conn = conn.connection.connection
+
+            eq_(
+                testing.db.dialect.get_isolation_level(dbapi_conn),
+                "READ COMMITTED",
+            )
+
+    def test_graceful_failure_isolation_level_not_available(self):
+        engine = engines.testing_engine()
+
+        def get_isolation_level(connection):
+            raise exc.DBAPIError(
+                "get isolation level",
+                {},
+                engine.dialect.dbapi.Error("isolation level failed"),
+            )
+
+        with mock.patch.object(
+            engine.dialect, "get_isolation_level", get_isolation_level
+        ):
+            conn = engine.connect()
+            eq_(conn.dialect.default_isolation_level, "READ COMMITTED")
+
+            # test that we can use isolation level setting and that it
+            # reverts for "real" back to READ COMMITTED even though we
+            # can't read it
+            dbapi_conn = conn.connection.connection
+
+            conn = conn.execution_options(isolation_level="SERIALIZABLE")
+            eq_(
+                testing.db.dialect.get_isolation_level(dbapi_conn),
+                "SERIALIZABLE",
+            )
+
+            conn.close()
+            eq_(
+                testing.db.dialect.get_isolation_level(dbapi_conn),
+                "READ COMMITTED",
+            )
+
+            with engine.connect() as conn:
+                assert_raises_message(
+                    exc.DBAPIError,
+                    r".*isolation level failed.*",
+                    conn.get_isolation_level,
+                )
+
+
+class EncodingErrorsTest(fixtures.TestBase):
+    """mock test for encoding_errors.
+
+    While we tried to write a round trip test, I could only reproduce the
+    problem on Python 3 and only for STRING/CHAR.  I couldn't get a CLOB to
+    come back with broken encoding and also under py2k cx_Oracle would always
+    return a bytestring with the correct encoding.    Since the test barely
+    worked, it is not included here to avoid future problems.  It's not clear
+    what other levels of encode/decode are going on such that explicitly
+    selecting for AL16UTF16 is still returning a utf-8 bytestring under py2k or
+    for CLOBs, nor is it really  clear that this flag is useful, however, at
+    least for the Py3K case, cx_Oracle supports the flag and we did have one
+    user reporting that they had a (non-reproducible) database which
+    illustrated the problem so we will pass it in.
+
+    """
+
+    # NOTE: these numbers are arbitrary, they are not the actual
+    # cx_Oracle constants
+    cx_Oracle_NUMBER = 0
+    cx_Oracle_STRING = 1
+    cx_Oracle_FIXED_CHAR = 2
+    cx_Oracle_CLOB = 3
+    cx_Oracle_NCLOB = 4
+
+    @testing.fixture
+    def cx_Oracle(self):
+        return mock.Mock(
+            NUMBER=self.cx_Oracle_NUMBER,
+            STRING=self.cx_Oracle_STRING,
+            FIXED_CHAR=self.cx_Oracle_FIXED_CHAR,
+            CLOB=self.cx_Oracle_CLOB,
+            NCLOB=self.cx_Oracle_NCLOB,
+            version="7.0.1",
+            __future__=mock.Mock(),
+        )
+
+    _oracle_char_combinations = testing.combinations(
+        (
+            "STRING",
+            cx_Oracle_STRING,
+        ),
+        (
+            "FIXED_CHAR",
+            cx_Oracle_FIXED_CHAR,
+        ),
+        (
+            "CLOB",
+            cx_Oracle_CLOB,
+        ),
+        (
+            "NCLOB",
+            cx_Oracle_NCLOB,
+        ),
+        argnames="cx_oracle_type",
+        id_="ia",
+    )
+
+    def _assert_errorhandler(self, outconverter, has_errorhandler):
+        data = ue("\uee2c\u9a66")  # this is u"\uee2c\u9a66"
+
+        utf8_w_errors = data.encode("utf-16")
+
+        if has_errorhandler:
+
+            eq_(
+                outconverter(utf8_w_errors),
+                data.encode("utf-16").decode("utf-8", "ignore"),
+            )
+        else:
+            assert_raises(UnicodeDecodeError, outconverter, utf8_w_errors)
+
+    @_oracle_char_combinations
+    @testing.requires.python3
+    def test_older_cx_oracle_warning(self, cx_Oracle, cx_oracle_type):
+        cx_Oracle.version = "6.3"
+
+        ignore_dialect = cx_oracle.dialect(
+            dbapi=cx_Oracle, encoding_errors="ignore"
+        )
+        ignore_outputhandler = (
+            ignore_dialect._generate_connection_outputtype_handler()
+        )
+
+        cursor = mock.Mock()
+
+        with testing.expect_warnings(
+            r"cx_oracle version \(6, 3\) does not support encodingErrors"
+        ):
+            ignore_outputhandler(
+                cursor, "foo", cx_oracle_type, None, None, None
+            )
+
+    @_oracle_char_combinations
+    @testing.requires.python2
+    def test_encoding_errors_sqla_py2k(
+        self,
+        cx_Oracle,
+        cx_oracle_type,
+    ):
+        ignore_dialect = cx_oracle.dialect(
+            dbapi=cx_Oracle, encoding_errors="ignore"
+        )
+
+        ignore_outputhandler = (
+            ignore_dialect._generate_connection_outputtype_handler()
+        )
+
+        cursor = mock.Mock()
+        ignore_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
+        outconverter = cursor.mock_calls[0][2]["outconverter"]
+        self._assert_errorhandler(outconverter, True)
+
+    @_oracle_char_combinations
+    @testing.requires.python2
+    def test_no_encoding_errors_sqla_py2k(
+        self,
+        cx_Oracle,
+        cx_oracle_type,
+    ):
+        plain_dialect = cx_oracle.dialect(dbapi=cx_Oracle)
+
+        plain_outputhandler = (
+            plain_dialect._generate_connection_outputtype_handler()
+        )
+
+        cursor = mock.Mock()
+        plain_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
+        outconverter = cursor.mock_calls[0][2]["outconverter"]
+        self._assert_errorhandler(outconverter, False)
+
+    @_oracle_char_combinations
+    @testing.requires.python3
+    def test_encoding_errors_cx_oracle_py3k(
+        self,
+        cx_Oracle,
+        cx_oracle_type,
+    ):
+        ignore_dialect = cx_oracle.dialect(
+            dbapi=cx_Oracle, encoding_errors="ignore"
+        )
+
+        ignore_outputhandler = (
+            ignore_dialect._generate_connection_outputtype_handler()
+        )
+
+        cursor = mock.Mock()
+        ignore_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
+
+        eq_(
+            cursor.mock_calls,
+            [
+                mock.call.var(
+                    mock.ANY,
+                    None,
+                    cursor.arraysize,
+                    encodingErrors="ignore",
+                )
+            ],
+        )
+
+    @_oracle_char_combinations
+    @testing.requires.python3
+    def test_no_encoding_errors_cx_oracle_py3k(
+        self,
+        cx_Oracle,
+        cx_oracle_type,
+    ):
+        plain_dialect = cx_oracle.dialect(dbapi=cx_Oracle)
+
+        plain_outputhandler = (
+            plain_dialect._generate_connection_outputtype_handler()
+        )
+
+        cursor = mock.Mock()
+        plain_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
+
+        eq_(
+            cursor.mock_calls,
+            [mock.call.var(mock.ANY, None, cursor.arraysize)],
+        )
+
+
+class ComputedReturningTest(fixtures.TablesTest):
+    __only_on__ = "oracle"
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("foo", Integer),
+            Column("bar", Integer, Computed("foo + 42")),
+        )
+
+        Table(
+            "test_no_returning",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("foo", Integer),
+            Column("bar", Integer, Computed("foo + 42")),
+            implicit_returning=False,
+        )
+
+    def test_computed_insert(self):
+        test = self.tables.test
+        with testing.db.connect() as conn:
+            result = conn.execute(
+                test.insert().return_defaults(), {"id": 1, "foo": 5}
+            )
+
+            eq_(result.returned_defaults, (47,))
+
+            eq_(conn.scalar(select([test.c.bar])), 47)
+
+    def test_computed_update_warning(self, connection):
+        test = self.tables.test
+        conn = connection
+        conn.execute(test.insert(), {"id": 1, "foo": 5})
+
+        if testing.db.dialect._supports_update_returning_computed_cols:
+            result = conn.execute(
+                test.update().values(foo=10).return_defaults()
+            )
+            eq_(result.returned_defaults, (52,))
+        else:
+            with testing.expect_warnings(
+                "Computed columns don't work with Oracle UPDATE"
+            ):
+                result = conn.execute(
+                    test.update().values(foo=10).return_defaults()
+                )
+
+                # returns the *old* value
+                eq_(result.returned_defaults, (47,))
+
+        eq_(conn.scalar(select([test.c.bar])), 52)
+
+    def test_computed_update_no_warning(self):
+        test = self.tables.test_no_returning
+        with testing.db.connect() as conn:
+            conn.execute(test.insert(), {"id": 1, "foo": 5})
+
+            result = conn.execute(
+                test.update().values(foo=10).return_defaults()
+            )
+
+            # no returning
+            eq_(result.returned_defaults, None)
+
+            eq_(conn.scalar(select([test.c.bar])), 52)
 
 
 class OutParamTest(fixtures.TestBase, AssertsExecutionResults):
@@ -109,7 +435,7 @@ class QuotedBindRoundTripTest(fixtures.TestBase):
 
     @testing.provide_metadata
     def test_table_round_trip(self):
-        oracle.RESERVED_WORDS.remove("UNION")
+        oracle.RESERVED_WORDS.discard("UNION")
 
         metadata = self.metadata
         table = Table(
@@ -157,13 +483,21 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
             return server_version
 
         dialect = oracle.dialect(
-            dbapi=Mock(version="0.0.0", paramstyle="named"), **kw
+            dbapi=Mock(
+                version="0.0.0",
+                paramstyle="named",
+            ),
+            **kw
         )
+
         dialect._get_server_version_info = server_version_info
+        dialect.get_isolation_level = Mock()
         dialect._check_unicode_returns = Mock()
         dialect._check_unicode_description = Mock()
         dialect._get_default_schema_name = Mock()
         dialect._detect_decimal_char = Mock()
+        dialect.__check_max_identifier_length = Mock()
+        dialect._get_compat_server_version_info = Mock()
         return dialect
 
     def test_ora8_flags(self):
@@ -218,6 +552,121 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(String(50), "VARCHAR2(50 CHAR)", dialect=dialect)
         self.assert_compile(Unicode(50), "NVARCHAR2(50)", dialect=dialect)
         self.assert_compile(UnicodeText(), "NCLOB", dialect=dialect)
+
+    def _expect_max_ident_warning(self):
+        return testing.expect_warnings(
+            "Oracle version .* is known to have a maximum "
+            "identifier length of 128"
+        )
+
+    def test_ident_length_in_13_is_30(self):
+        from sqlalchemy import __version__
+
+        m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", __version__)
+        version = tuple(int(x) for x in m.group(1, 2, 3) if x is not None)
+        if version >= (1, 4):
+            length = 128
+        else:
+            length = 30
+
+        eq_(oracle.OracleDialect.max_identifier_length, length)
+
+        dialect = self._dialect((12, 2, 0))
+        conn = mock.Mock(
+            execute=mock.Mock(return_value=mock.Mock(scalar=lambda: "12.2.0"))
+        )
+        with self._expect_max_ident_warning():
+            dialect.initialize(conn)
+        eq_(dialect.server_version_info, (12, 2, 0))
+        eq_(
+            dialect._get_effective_compat_server_version_info(conn), (12, 2, 0)
+        )
+        eq_(dialect.max_identifier_length, length)
+
+    def test_max_ident_122(self):
+        dialect = self._dialect((12, 2, 0))
+
+        conn = mock.Mock(
+            execute=mock.Mock(return_value=mock.Mock(scalar=lambda: "12.2.0"))
+        )
+        with self._expect_max_ident_warning():
+            dialect.initialize(conn)
+        eq_(dialect.server_version_info, (12, 2, 0))
+        eq_(
+            dialect._get_effective_compat_server_version_info(conn), (12, 2, 0)
+        )
+        eq_(
+            dialect.max_identifier_length,
+            oracle.OracleDialect.max_identifier_length,
+        )
+
+    def test_max_ident_112(self):
+        dialect = self._dialect((11, 2, 0))
+
+        conn = mock.Mock(
+            execute=mock.Mock(return_value=mock.Mock(scalar="11.0.0"))
+        )
+        dialect.initialize(conn)
+        eq_(dialect.server_version_info, (11, 2, 0))
+        eq_(
+            dialect._get_effective_compat_server_version_info(conn), (11, 2, 0)
+        )
+        eq_(dialect.max_identifier_length, 30)
+
+    def test_max_ident_122_11compat(self):
+        dialect = self._dialect((12, 2, 0))
+
+        conn = mock.Mock(
+            execute=mock.Mock(return_value=mock.Mock(scalar=lambda: "11.0.0"))
+        )
+        dialect.initialize(conn)
+        eq_(dialect.server_version_info, (12, 2, 0))
+        eq_(
+            dialect._get_effective_compat_server_version_info(conn), (11, 0, 0)
+        )
+        eq_(dialect.max_identifier_length, 30)
+
+    def test_max_ident_122_11compat_vparam_raises(self):
+        dialect = self._dialect((12, 2, 0))
+
+        def c122():
+            raise exc.DBAPIError(
+                "statement", None, "no such table", None, None
+            )
+
+        conn = mock.Mock(
+            execute=mock.Mock(return_value=mock.Mock(scalar=c122))
+        )
+        with self._expect_max_ident_warning():
+            dialect.initialize(conn)
+        eq_(dialect.server_version_info, (12, 2, 0))
+        eq_(
+            dialect._get_effective_compat_server_version_info(conn), (12, 2, 0)
+        )
+        eq_(
+            dialect.max_identifier_length,
+            oracle.OracleDialect.max_identifier_length,
+        )
+
+    def test_max_ident_122_11compat_vparam_cant_parse(self):
+        dialect = self._dialect((12, 2, 0))
+
+        def c122():
+            return "12.thisiscrap.0"
+
+        conn = mock.Mock(
+            execute=mock.Mock(return_value=mock.Mock(scalar=c122))
+        )
+        with self._expect_max_ident_warning():
+            dialect.initialize(conn)
+        eq_(dialect.server_version_info, (12, 2, 0))
+        eq_(
+            dialect._get_effective_compat_server_version_info(conn), (12, 2, 0)
+        )
+        eq_(
+            dialect.max_identifier_length,
+            oracle.OracleDialect.max_identifier_length,
+        )
 
 
 class ExecuteTest(fixtures.TestBase):

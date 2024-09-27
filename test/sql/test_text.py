@@ -15,6 +15,7 @@ from sqlalchemy import MetaData
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import union
 from sqlalchemy import util
@@ -277,6 +278,19 @@ class BindParamTest(fixtures.TestBase, AssertsCompiledSQL):
             "select * from foo where lala=%(bar)s and hoho=%(whee)s",
             checkparams={"bar": 4, "whee": 7},
             dialect="postgresql",
+        )
+
+    def test_unique_binds(self):
+        # unique binds can be used in text() however they uniquify across
+        # multiple text() constructs only, not within a single text
+
+        t1 = text("select :foo").bindparams(bindparam("foo", 5, unique=True))
+        t2 = text("select :foo").bindparams(bindparam("foo", 10, unique=True))
+        stmt = select([t1, t2])
+        self.assert_compile(
+            stmt,
+            "SELECT select :foo_1, select :foo_2",
+            checkparams={"foo_1": 5, "foo_2": 10},
         )
 
     def test_binds_compiled_positional(self):
@@ -616,14 +630,16 @@ class TextErrorsTest(fixtures.TestBase, AssertsCompiledSQL):
 class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
-    def _test_exception(self, stmt, offending_clause):
+    def _test_exception(self, stmt, offending_clause, dialect=None):
         assert_raises_message(
             exc.CompileError,
-            r"Can't resolve label reference for ORDER BY / GROUP BY. "
+            r"Can't resolve label reference for ORDER BY / GROUP BY / "
+            "DISTINCT etc. "
             "Textual SQL "
             "expression %r should be explicitly "
             r"declared as text\(%r\)" % (offending_clause, offending_clause),
             stmt.compile,
+            dialect=dialect,
         )
 
     def test_order_by_label(self):
@@ -645,6 +661,25 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
             stmt,
             "SELECT mytable_1.myid AS mytable_1_myid "
             "FROM mytable AS mytable_1 ORDER BY mytable_1.name",
+        )
+
+    @testing.combinations(
+        ((column("q") + 5).label("a"), "a", ()),
+        (column("q").op("+")(5).label("a"), "a", ()),
+        ((column("q") + 5).label("a"), "a DESC", (desc,)),
+        (column("q").op("+")(5).label("a"), "a DESC", (desc,)),
+    )
+    def test_order_by_expr(self, case, expected, modifiers):
+
+        order_by = case
+        for mod in modifiers:
+            order_by = mod(order_by)
+
+        stmt = select([case]).order_by(order_by)
+
+        col_expr = str(case)
+        self.assert_compile(
+            stmt, "SELECT %s AS a ORDER BY %s" % (col_expr, expected)
         )
 
     def test_order_by_named_label_from_anon_label(self):
@@ -673,6 +708,30 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_unresolvable_warning_order_by(self):
         stmt = select([table1.c.myid]).order_by("foobar")
         self._test_exception(stmt, "foobar")
+
+    def test_distinct_label(self):
+
+        stmt = select([table1.c.myid.label("foo")]).distinct("foo")
+        self.assert_compile(
+            stmt,
+            "SELECT DISTINCT ON (foo) mytable.myid AS foo FROM mytable",
+            dialect="postgresql",
+        )
+
+    def test_distinct_label_keyword(self):
+
+        stmt = select([table1.c.myid.label("foo")], distinct="foo")
+        self.assert_compile(
+            stmt,
+            "SELECT DISTINCT ON (foo) mytable.myid AS foo FROM mytable",
+            dialect="postgresql",
+        )
+
+    def test_unresolvable_distinct_label(self):
+        from sqlalchemy.dialects import postgresql
+
+        stmt = select([table1.c.myid.label("foo")]).distinct("not a label")
+        self._test_exception(stmt, "not a label", dialect=postgresql.dialect())
 
     def test_group_by_label(self):
         stmt = select([table1.c.myid.label("foo")]).group_by("foo")
@@ -827,7 +886,8 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
 
         assert_raises_message(
             exc.CompileError,
-            r"Can't resolve label reference for ORDER BY / GROUP BY. "
+            r"Can't resolve label reference for ORDER BY / GROUP BY / "
+            "DISTINCT etc. "
             "Textual SQL "
             "expression 't1name' should be explicitly "
             r"declared as text\('t1name'\)",

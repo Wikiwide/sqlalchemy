@@ -69,9 +69,9 @@ class BaseAndSubFixture(object):
             a_sub_id = Column(ForeignKey("asub.id"))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, ASub, C = cls.classes("A", "B", "ASub", "C")
-        s = Session()
+        s = Session(connection)
         s.add(A(id=1, adata="adata", bs=[B(), B()]))
         s.add(
             ASub(
@@ -121,14 +121,13 @@ class BaseAndSubFixture(object):
                         "SELECT c.a_sub_id AS c_a_sub_id, "
                         "c.id AS c_id "
                         "FROM c WHERE c.a_sub_id "
-                        "IN ([EXPANDING_primary_keys]) ORDER BY c.a_sub_id",
+                        "IN ([EXPANDING_primary_keys])",
                         {"primary_keys": [2]},
                     ),
                 ),
                 CompiledSQL(
                     "SELECT b.a_id AS b_a_id, b.id AS b_id FROM b "
-                    "WHERE b.a_id IN ([EXPANDING_primary_keys]) "
-                    "ORDER BY b.a_id",
+                    "WHERE b.a_id IN ([EXPANDING_primary_keys])",
                     {"primary_keys": [1, 2]},
                 ),
             ),
@@ -255,7 +254,7 @@ class FixtureLoadTest(_Polymorphic, testing.AssertsExecutionResults):
                 "people.name AS people_name, people.type AS people_type "
                 "FROM people WHERE people.company_id "
                 "IN ([EXPANDING_primary_keys]) "
-                "ORDER BY people.company_id, people.person_id",
+                "ORDER BY people.person_id",
                 {"primary_keys": [1, 2]},
             ),
             AllOf(
@@ -565,11 +564,11 @@ class LoaderOptionsTest(
             )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Parent, ChildSubclass1, Other = cls.classes(
             "Parent", "ChildSubclass1", "Other"
         )
-        session = Session()
+        session = Session(connection)
 
         parent = Parent(id=1)
         subclass1 = ChildSubclass1(id=1, parent=parent)

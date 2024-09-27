@@ -29,6 +29,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import provision
 from sqlalchemy.testing.engines import testing_engine
+from sqlalchemy.testing.engines import testing_reaper
 
 
 # TODO: ShardTest can be turned into a base for further subclasses
@@ -463,8 +464,7 @@ class AttachedFileShardTest(ShardTest, fixtures.TestBase):
 
 
 class SelectinloadRegressionTest(fixtures.DeclarativeMappedTest):
-    """test #4175
-    """
+    """test #4175"""
 
     @classmethod
     def setup_classes(cls):
@@ -511,9 +511,9 @@ class RefreshDeferExpireTest(fixtures.DeclarativeMappedTest):
             deferred_data = deferred(Column(String(30)))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A = cls.classes.A
-        s = Session()
+        s = Session(connection)
         s.add(A(data="d1", deferred_data="d2"))
         s.commit()
 
@@ -568,6 +568,8 @@ class LazyLoadIdentityKeyTest(fixtures.DeclarativeMappedTest):
     def teardown(self):
         for db in self.dbs:
             db.connect().invalidate()
+
+        testing_reaper.close_all()
         for i in range(1, 3):
             os.remove("shard%d_%s.db" % (i, provision.FOLLOWER_IDENT))
 

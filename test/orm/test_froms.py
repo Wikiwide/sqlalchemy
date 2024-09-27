@@ -803,10 +803,10 @@ class AddEntityEquivalenceTest(fixtures.MappedTest, AssertsCompiledSQL):
         mapper(D, d, inherits=A, polymorphic_identity="d")
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, C, B = (cls.classes.A, cls.classes.C, cls.classes.B)
 
-        sess = create_session()
+        sess = create_session(connection)
         sess.add_all(
             [
                 B(name="b1"),
@@ -1229,6 +1229,36 @@ class InstancesTest(QueryTest, AssertsCompiledSQL):
                 )
                 .outerjoin(oalias, User.orders)
                 .outerjoin(ialias, oalias.items)
+                .order_by(User.id, oalias.id, ialias.id)
+            )
+            assert self.static.user_order_result == result.all()
+
+        self.assert_sql_count(testing.db, go, 1)
+
+    def test_contains_eager_multi_aliased_of_type(self):
+        # test newer style that does not use the alias parameter
+        Item, User, Order = (
+            self.classes.Item,
+            self.classes.User,
+            self.classes.Order,
+        )
+
+        sess = create_session()
+        q = sess.query(User)
+
+        # test using Aliased with more than one level deep
+        oalias = aliased(Order)
+        ialias = aliased(Item)
+
+        def go():
+            result = (
+                q.options(
+                    contains_eager(User.orders.of_type(oalias)).contains_eager(
+                        oalias.items.of_type(ialias)
+                    )
+                )
+                .outerjoin(User.orders.of_type(oalias))
+                .outerjoin(oalias.items.of_type(ialias))
                 .order_by(User.id, oalias.id, ialias.id)
             )
             assert self.static.user_order_result == result.all()
@@ -2270,7 +2300,7 @@ class MixedEntitiesTest(QueryTest, AssertsCompiledSQL):
             .order_by(User.id)
         )
         q = sess.query(User)
-        result = q.add_column("count").from_statement(s).all()
+        result = q.add_column(literal_column("count")).from_statement(s).all()
         assert result == expected
 
     def test_raw_columns(self):
@@ -2315,7 +2345,10 @@ class MixedEntitiesTest(QueryTest, AssertsCompiledSQL):
         )
         q = create_session().query(User)
         result = (
-            q.add_column("count").add_column("concat").from_statement(s).all()
+            q.add_column(literal_column("count"))
+            .add_column(literal_column("concat"))
+            .from_statement(s)
+            .all()
         )
         assert result == expected
 
@@ -3586,8 +3619,8 @@ class LabelCollideTest(fixtures.MappedTest):
         mapper(cls.classes.Bar, cls.tables.foo_bar)
 
     @classmethod
-    def insert_data(cls):
-        s = Session()
+    def insert_data(cls, connection):
+        s = Session(connection)
         s.add_all([cls.classes.Foo(id=1, bar_id=2), cls.classes.Bar(id=3)])
         s.commit()
 

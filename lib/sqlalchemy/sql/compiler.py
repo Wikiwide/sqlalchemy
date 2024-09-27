@@ -1,5 +1,5 @@
 # sql/compiler.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -265,6 +265,8 @@ class Compiled(object):
 
     _cached_metadata = None
 
+    schema_translate_map = None
+
     execution_options = util.immutabledict()
     """
     Execution options propagated from the statement.   In some cases,
@@ -283,7 +285,7 @@ class Compiled(object):
 
         :param dialect: :class:`.Dialect` to compile against.
 
-        :param statement: :class:`.ClauseElement` to be compiled.
+        :param statement: :class:`_expression.ClauseElement` to be compiled.
 
         :param bind: Optional Engine or Connection to compile this
           statement against.
@@ -306,6 +308,7 @@ class Compiled(object):
         self.dialect = dialect
         self.bind = bind
         self.preparer = self.dialect.identifier_preparer
+        self.schema_translate_map = schema_translate_map
         if schema_translate_map:
             self.preparer = self.preparer._with_schema_translate(
                 schema_translate_map
@@ -326,8 +329,7 @@ class Compiled(object):
         "does nothing.",
     )
     def compile(self):
-        """Produce the internal string representation of this element.
-        """
+        """Produce the internal string representation of this element."""
         pass
 
     def _execute_on_connection(self, connection, multiparams, params):
@@ -424,10 +426,28 @@ class _CompileLabel(visitors.Visitable):
         return self
 
 
+class prefix_anon_map(dict):
+    """A map that creates new keys for missing key access.
+    Considers keys of the form "<ident> <name>" to produce
+    new symbols "<name>_<index>", where "index" is an incrementing integer
+    corresponding to <name>.
+    Inlines the approach taken by :class:`sqlalchemy.util.PopulateDict` which
+    is otherwise usually used for this type of operation.
+    """
+
+    def __missing__(self, key):
+        (ident, derived) = key.split(" ", 1)
+        anonymous_counter = self.get(derived, 1)
+        self[derived] = anonymous_counter + 1
+        value = derived + "_" + str(anonymous_counter)
+        self[key] = value
+        return value
+
+
 class SQLCompiler(Compiled):
     """Default implementation of :class:`.Compiled`.
 
-    Compiles :class:`.ClauseElement` objects into SQL strings.
+    Compiles :class:`_expression.ClauseElement` objects into SQL strings.
 
     """
 
@@ -513,7 +533,7 @@ class SQLCompiler(Compiled):
 
         :param dialect: :class:`.Dialect` to be used
 
-        :param statement: :class:`.ClauseElement` to be compiled
+        :param statement: :class:`_expression.ClauseElement` to be compiled
 
         :param column_keys:  a list of column names to be compiled into an
          INSERT or UPDATE statement.
@@ -563,11 +583,12 @@ class SQLCompiler(Compiled):
 
         # a map which tracks "anonymous" identifiers that are created on
         # the fly here
-        self.anon_map = util.PopulateDict(self._process_anon)
+        self.anon_map = prefix_anon_map()
 
         # a map which tracks "truncated" names based on
         # dialect.label_length or dialect.max_identifier_length
         self.truncated_names = {}
+
         Compiled.__init__(self, dialect, statement, **kwargs)
 
         if (
@@ -577,6 +598,44 @@ class SQLCompiler(Compiled):
 
         if self.positional and self._numeric_binds:
             self._apply_numbered_params()
+
+    @property
+    def current_executable(self):
+        """Return the current 'executable' that is being compiled.
+
+        This is currently the :class:`_sql.Select`, :class:`_sql.Insert`,
+        :class:`_sql.Update`, :class:`_sql.Delete`,
+        :class:`_sql.CompoundSelect` object that is being compiled.
+        Specifically it's assigned to the ``self.stack`` list of elements.
+
+        When a statement like the above is being compiled, it normally
+        is also assigned to the ``.statement`` attribute of the
+        :class:`_sql.Compiler` object.   However, all SQL constructs are
+        ultimately nestable, and this attribute should never be consulted
+        by a ``visit_`` method, as it is not guaranteed to be assigned
+        nor guaranteed to correspond to the current statement being compiled.
+
+        .. versionadded:: 1.3.21
+
+            For compatibility with previous versions, use the following
+            recipe::
+
+                statement = getattr(self, "current_executable", False)
+                if statement is False:
+                    statement = self.stack[-1]["selectable"]
+
+            For versions 1.4 and above, ensure only .current_executable
+            is used; the format of "self.stack" may change.
+
+
+        """
+        try:
+            return self.stack[-1]["selectable"]
+        except IndexError as ie:
+            util.raise_(
+                IndexError("Compiler does not have a stack entry"),
+                replace_context=ie,
+            )
 
     @property
     def prefetch(self):
@@ -774,11 +833,13 @@ class SQLCompiler(Compiled):
                 col = only_froms[element.element]
             else:
                 col = with_cols[element.element]
-        except KeyError:
+        except KeyError as ke:
             elements._no_text_coercion(
                 element.element,
                 exc.CompileError,
-                "Can't resolve label reference for ORDER BY / GROUP BY.",
+                "Can't resolve label reference for ORDER BY / "
+                "GROUP BY / DISTINCT etc.",
+                err=ke,
             )
         else:
             kwargs["render_label_as_label"] = col
@@ -1102,6 +1163,7 @@ class SQLCompiler(Compiled):
                 name = (
                     self.preparer.quote(name)
                     if self.preparer._requires_quotes_illegal_chars(name)
+                    or isinstance(name, elements.quoted_name)
                     else name
                 )
                 name = name + "%(expr)s"
@@ -1110,6 +1172,7 @@ class SQLCompiler(Compiled):
                     (
                         self.preparer.quote(tok)
                         if self.preparer._requires_quotes_illegal_chars(tok)
+                        or isinstance(name, elements.quoted_name)
                         else tok
                     )
                     for tok in func.packagenames
@@ -1292,8 +1355,11 @@ class SQLCompiler(Compiled):
         else:
             try:
                 opstring = OPERATORS[operator_]
-            except KeyError:
-                raise exc.UnsupportedCompilationError(self, operator_)
+            except KeyError as err:
+                util.raise_(
+                    exc.UnsupportedCompilationError(self, operator_),
+                    replace_context=err,
+                )
             else:
                 return self._generate_generic_binary(binary, opstring, **kw)
 
@@ -1576,12 +1642,6 @@ class SQLCompiler(Compiled):
     def _anonymize(self, name):
         return name % self.anon_map
 
-    def _process_anon(self, key):
-        (ident, derived) = key.split(" ", 1)
-        anonymous_counter = self.anon_map.get(derived, 1)
-        self.anon_map[derived] = anonymous_counter + 1
-        return derived + "_" + str(anonymous_counter)
-
     def bindparam_string(
         self, name, positional_names=None, expanding=False, **kw
     ):
@@ -1693,8 +1753,11 @@ class SQLCompiler(Compiled):
                 if self.positional:
                     kwargs["positional_names"] = self.cte_positional[cte] = []
 
-                text += " AS \n" + cte.original._compiler_dispatch(
-                    self, asfrom=True, **kwargs
+                text += " AS %s\n%s" % (
+                    self._generate_prefixes(cte, cte._prefixes, **kwargs),
+                    cte.original._compiler_dispatch(
+                        self, asfrom=True, **kwargs
+                    ),
                 )
 
                 if cte._suffixes:
@@ -2749,10 +2812,12 @@ class StrSQLCompiler(SQLCompiler):
 
     The :class:`.StrSQLCompiler` is invoked whenever a Core expression
     element is directly stringified without calling upon the
-    :meth:`.ClauseElement.compile` method.   It can render a limited set
+    :meth:`_expression.ClauseElement.compile` method.
+    It can render a limited set
     of non-standard SQL constructs to assist in basic stringification,
     however for more substantial custom or dialect-specific SQL constructs,
-    it will be necessary to make use of :meth:`.ClauseElement.compile`
+    it will be necessary to make use of
+    :meth:`_expression.ClauseElement.compile`
     directly.
 
     .. seealso::
@@ -2803,11 +2868,16 @@ class StrSQLCompiler(SQLCompiler):
             for t in extra_froms
         )
 
+    def get_from_hint_text(self, table, text):
+        return "[%s]" % text
+
 
 class DDLCompiler(Compiled):
     @util.memoized_property
     def sql_compiler(self):
-        return self.dialect.statement_compiler(self.dialect, None)
+        return self.dialect.statement_compiler(
+            self.dialect, None, schema_translate_map=self.schema_translate_map
+        )
 
     @util.memoized_property
     def type_compiler(self):
@@ -2878,11 +2948,12 @@ class DDLCompiler(Compiled):
                 if column.primary_key:
                     first_pk = True
             except exc.CompileError as ce:
-                util.raise_from_cause(
+                util.raise_(
                     exc.CompileError(
                         util.u("(in table '%s', column '%s'): %s")
                         % (table.description, column.name, ce.args[0])
-                    )
+                    ),
+                    from_=ce,
                 )
 
         const = self.create_table_constraints(
@@ -2972,6 +3043,10 @@ class DDLCompiler(Compiled):
         text = "CREATE "
         if index.unique:
             text += "UNIQUE "
+        if index.name is None:
+            raise exc.CompileError(
+                "CREATE INDEX requires that the index have a name"
+            )
         text += "INDEX %s ON %s (%s)" % (
             self._prepared_index_name(index, include_schema=include_schema),
             preparer.format_table(
@@ -2988,6 +3063,11 @@ class DDLCompiler(Compiled):
 
     def visit_drop_index(self, drop):
         index = drop.element
+
+        if index.name is None:
+            raise exc.CompileError(
+                "DROP INDEX requires that the index have a name"
+            )
         return "\nDROP INDEX " + self._prepared_index_name(
             index, include_schema=True
         )
@@ -3099,6 +3179,9 @@ class DDLCompiler(Compiled):
         if default is not None:
             colspec += " DEFAULT " + default
 
+        if column.computed is not None:
+            colspec += " " + self.process(column.computed)
+
         if not column.nullable:
             colspec += " NOT NULL"
         return colspec
@@ -3201,7 +3284,8 @@ class DDLCompiler(Compiled):
         text = ""
         if constraint.name is not None:
             formatted_name = self.preparer.format_constraint(constraint)
-            text += "CONSTRAINT %s " % formatted_name
+            if formatted_name is not None:
+                text += "CONSTRAINT %s " % formatted_name
         text += "UNIQUE (%s)" % (
             ", ".join(self.preparer.quote(c.name) for c in constraint)
         )
@@ -3237,6 +3321,16 @@ class DDLCompiler(Compiled):
         text = ""
         if constraint.match is not None:
             text += " MATCH %s" % constraint.match
+        return text
+
+    def visit_computed_column(self, generated):
+        text = "GENERATED ALWAYS AS (%s)" % self.sql_compiler.process(
+            generated.sqltext, include_table=False, literal_binds=True
+        )
+        if generated.persisted is True:
+            text += " STORED"
+        elif generated.persisted is False:
+            text += " VIRTUAL"
         return text
 
 
@@ -3649,27 +3743,30 @@ class IdentifierPreparer(object):
 
     @util.dependencies("sqlalchemy.sql.naming")
     def format_constraint(self, naming, constraint):
-        if isinstance(constraint.name, elements._defer_name):
+        if constraint.name is elements._NONE_NAME:
             name = naming._constraint_name_for_table(
                 constraint, constraint.table
             )
 
             if name is None:
-                if isinstance(constraint.name, elements._defer_none_name):
-                    return None
-                else:
-                    name = constraint.name
+                return None
         else:
             name = constraint.name
 
         if isinstance(name, elements._truncated_label):
+            # calculate these at format time so that ad-hoc changes
+            # to dialect.max_identifier_length etc. can be reflected
+            # as IdentifierPreparer is long lived
             if constraint.__visit_name__ == "index":
                 max_ = (
                     self.dialect.max_index_name_length
                     or self.dialect.max_identifier_length
                 )
             else:
-                max_ = self.dialect.max_identifier_length
+                max_ = (
+                    self.dialect.max_constraint_name_length
+                    or self.dialect.max_identifier_length
+                )
             if len(name) > max_:
                 name = name[0 : max_ - 8] + "_" + util.md5_hex(name)[-4:]
         else:

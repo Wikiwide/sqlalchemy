@@ -1,5 +1,5 @@
 # event/base.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -29,7 +29,13 @@ _registrars = util.defaultdict(list)
 
 
 def _is_event_name(name):
-    return not name.startswith("_") and name != "dispatch"
+    # _sa_event prefix is special to support internal-only event names.
+    # most event names are just plain method names that aren't
+    # underscored.
+
+    return (
+        not name.startswith("_") and name != "dispatch"
+    ) or name.startswith("_sa_event")
 
 
 class _UnpickleDispatch(object):
@@ -142,7 +148,7 @@ class _Dispatch(object):
 
     def _update(self, other, only_propagate=True):
         """Populate from the listeners in another :class:`_Dispatch`
-            object."""
+        object."""
         for ls in other._event_descriptors:
             if isinstance(ls, _EmptyListener):
                 continue
@@ -161,7 +167,7 @@ class _EventMeta(type):
 
     def __init__(cls, classname, bases, dict_):
         _create_dispatcher_class(cls, classname, bases, dict_)
-        return type.__init__(cls, classname, bases, dict_)
+        type.__init__(cls, classname, bases, dict_)
 
 
 def _create_dispatcher_class(cls, classname, bases, dict_):
@@ -213,7 +219,7 @@ class Events(util.with_metaclass(_EventMeta, object)):
         # This allows an Events subclass to define additional utility
         # methods made available to the target via
         # "self.dispatch._events.<utilitymethod>"
-        # @staticemethod to allow easy "super" calls while in a metaclass
+        # @staticmethod to allow easy "super" calls while in a metaclass
         # constructor.
         cls.dispatch = dispatch_cls(None)
         dispatch_cls._events = cls

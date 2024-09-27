@@ -1562,7 +1562,7 @@ class M2OCascadeDeleteOrphanTestOne(fixtures.MappedTest):
         mapper(Foo, foo)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Pref, User, Extra = (
             cls.classes.Pref,
             cls.classes.User,
@@ -1572,7 +1572,7 @@ class M2OCascadeDeleteOrphanTestOne(fixtures.MappedTest):
         u1 = User(name="ed", pref=Pref(data="pref 1", extra=[Extra()]))
         u2 = User(name="jack", pref=Pref(data="pref 2", extra=[Extra()]))
         u3 = User(name="foo", pref=Pref(data="pref 3", extra=[Extra()]))
-        sess = create_session()
+        sess = create_session(connection)
         sess.add_all((u1, u2, u3))
         sess.flush()
         sess.close()
@@ -2233,7 +2233,7 @@ class M2MCascadeTest(fixtures.MappedTest):
         mapper(B, b)
         assert_raises_message(
             sa_exc.ArgumentError,
-            "On A.bs, delete-orphan cascade is not supported",
+            "For many-to-many relationship A.bs, delete-orphan cascade",
             configure_mappers,
         )
 
@@ -3619,8 +3619,8 @@ class O2MConflictTest(fixtures.MappedTest):
 
 
 class PartialFlushTest(fixtures.MappedTest):
-    """test cascade behavior as it relates to object lists passed to flush().
-    """
+    """test cascade behavior as it relates to object lists passed to
+    flush()."""
 
     @classmethod
     def define_tables(cls, metadata):

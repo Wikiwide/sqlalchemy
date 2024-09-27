@@ -10,6 +10,7 @@ from sqlalchemy import bindparam
 from sqlalchemy import CheckConstraint
 from sqlalchemy import Column
 from sqlalchemy import column
+from sqlalchemy import Computed
 from sqlalchemy import create_engine
 from sqlalchemy import DefaultClause
 from sqlalchemy import event
@@ -42,6 +43,7 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
+from sqlalchemy.testing import combinations
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
@@ -63,9 +65,7 @@ class TestTypes(fixtures.TestBase, AssertsExecutionResults):
     __only_on__ = "sqlite"
 
     def test_boolean(self):
-        """Test that the boolean only treats 1 as True
-
-        """
+        """Test that the boolean only treats 1 as True"""
 
         meta = MetaData(testing.db)
         t = Table(
@@ -584,11 +584,15 @@ class DefaultsTest(fixtures.TestBase, AssertsCompiledSQL):
         """test non-quoted integer value on older sqlite pragma"""
 
         dialect = sqlite.dialect()
-        info = dialect._get_column_info("foo", "INTEGER", False, 3, False)
+        info = dialect._get_column_info(
+            "foo", "INTEGER", False, 3, False, False, False, None
+        )
         eq_(info["default"], "3")
 
 
-class DialectTest(fixtures.TestBase, AssertsExecutionResults):
+class DialectTest(
+    fixtures.TestBase, AssertsExecutionResults, AssertsCompiledSQL
+):
 
     __only_on__ = "sqlite"
 
@@ -598,7 +602,7 @@ class DialectTest(fixtures.TestBase, AssertsExecutionResults):
         'true', 'false', and 'column' are undocumented reserved words
         when used as column identifiers (as of 3.5.1).  Covering them
         here to ensure they remain in place if the dialect's
-        reserved_words set is updated in the future. """
+        reserved_words set is updated in the future."""
 
         meta = MetaData(testing.db)
         t = Table(
@@ -608,6 +612,7 @@ class DialectTest(fixtures.TestBase, AssertsExecutionResults):
             Column("true", Integer),
             Column("false", Integer),
             Column("column", Integer),
+            Column("exists", Integer),
         )
         try:
             meta.create_all()
@@ -647,7 +652,7 @@ class DialectTest(fixtures.TestBase, AssertsExecutionResults):
 
     @testing.provide_metadata
     def test_quoted_identifiers_functional_two(self):
-        """"test the edgiest of edge cases, quoted table/col names
+        """ "test the edgiest of edge cases, quoted table/col names
         that start and end with quotes.
 
         SQLite claims to have fixed this in
@@ -700,13 +705,6 @@ class DialectTest(fixtures.TestBase, AssertsExecutionResults):
         assert u("méil") in result.keys()
         assert ue("\u6e2c\u8a66") in result.keys()
 
-    def test_file_path_is_absolute(self):
-        d = pysqlite_dialect.dialect()
-        eq_(
-            d.create_connect_args(make_url("sqlite:///foo.db")),
-            ([os.path.abspath("foo.db")], {}),
-        )
-
     def test_pool_class(self):
         e = create_engine("sqlite+pysqlite://")
         assert e.pool.__class__ is pool.SingletonThreadPool
@@ -716,6 +714,66 @@ class DialectTest(fixtures.TestBase, AssertsExecutionResults):
 
         e = create_engine("sqlite+pysqlite:///foo.db")
         assert e.pool.__class__ is pool.NullPool
+
+    @combinations(
+        (
+            "sqlite:///foo.db",  # file path is absolute
+            ([os.path.abspath("foo.db")], {}),
+        ),
+        (
+            "sqlite:////abs/path/to/foo.db",
+            ([os.path.abspath("/abs/path/to/foo.db")], {}),
+        ),
+        ("sqlite://", ([":memory:"], {})),
+        (
+            "sqlite:///?check_same_thread=true",
+            ([":memory:"], {"check_same_thread": True}),
+        ),
+        (
+            "sqlite:///file:path/to/database?"
+            "check_same_thread=true&timeout=10&mode=ro&nolock=1&uri=true",
+            (
+                ["file:path/to/database?mode=ro&nolock=1"],
+                {"check_same_thread": True, "timeout": 10.0, "uri": True},
+            ),
+        ),
+        (
+            "sqlite:///file:path/to/database?" "mode=ro&uri=true",
+            (["file:path/to/database?mode=ro"], {"uri": True}),
+        ),
+        (
+            "sqlite:///file:path/to/database?uri=true",
+            (["file:path/to/database"], {"uri": True}),
+        ),
+    )
+    def test_connect_args(self, url, expected):
+        """test create_connect_args scenarios including support for uri=True"""
+
+        d = pysqlite_dialect.dialect()
+        url = make_url(url)
+        eq_(d.create_connect_args(url), expected)
+
+    @testing.combinations(
+        ("no_persisted", "", "ignore"),
+        ("persisted_none", "", None),
+        ("persisted_true", " STORED", True),
+        ("persisted_false", " VIRTUAL", False),
+        id_="iaa",
+    )
+    def test_column_computed(self, text, persisted):
+        m = MetaData()
+        kwargs = {"persisted": persisted} if persisted != "ignore" else {}
+        t = Table(
+            "t",
+            m,
+            Column("x", Integer),
+            Column("y", Integer, Computed("x + 2", **kwargs)),
+        )
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (x INTEGER,"
+            " y INTEGER GENERATED ALWAYS AS (x + 2)%s)" % text,
+        )
 
 
 class AttachedDBTest(fixtures.TestBase):
@@ -1053,6 +1111,16 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             tuple_(column("q"), column("p")).in_([(1, 2), (3, 4)]),
             "(q, p) IN (VALUES (?, ?), (?, ?))",
+        )
+
+    def test_create_table_without_rowid(self):
+        m = MetaData()
+        tbl = Table(
+            "atable", m, Column("id", Integer), sqlite_with_rowid=False
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE atable (id INTEGER) WITHOUT ROWID",
         )
 
 

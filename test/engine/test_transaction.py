@@ -592,6 +592,77 @@ class ResetAgentTest(fixtures.TestBase):
             trans.commit()
             assert connection.connection._reset_agent is None
 
+    def test_trans_close(self):
+        with testing.db.connect() as connection:
+            trans = connection.begin()
+            assert connection.connection._reset_agent is trans
+            trans.close()
+            assert connection.connection._reset_agent is None
+
+    def test_trans_reset_agent_broken_ensure(self):
+        eng = testing_engine()
+        conn = eng.connect()
+        trans = conn.begin()
+        assert conn.connection._reset_agent is trans
+        trans.is_active = False
+
+        with expect_warnings("Reset agent is not active"):
+            conn.close()
+
+    def test_trans_commit_reset_agent_broken_ensure(self):
+        eng = testing_engine(options={"pool_reset_on_return": "commit"})
+        conn = eng.connect()
+        trans = conn.begin()
+        assert conn.connection._reset_agent is trans
+        trans.is_active = False
+
+        with expect_warnings("Reset agent is not active"):
+            conn.close()
+
+    @testing.requires.savepoints
+    def test_begin_nested_trans_close_one(self):
+        with testing.db.connect() as connection:
+            t1 = connection.begin()
+            assert connection.connection._reset_agent is t1
+            t2 = connection.begin_nested()
+            assert connection.connection._reset_agent is t1
+            assert connection._Connection__transaction is t2
+            t2.close()
+            assert connection._Connection__transaction is t1
+            assert connection.connection._reset_agent is t1
+            t1.close()
+            assert connection.connection._reset_agent is None
+        assert not t1.is_active
+
+    @testing.requires.savepoints
+    def test_begin_nested_trans_close_two(self):
+        with testing.db.connect() as connection:
+            t1 = connection.begin()
+            assert connection.connection._reset_agent is t1
+            t2 = connection.begin_nested()
+            assert connection.connection._reset_agent is t1
+            assert connection._Connection__transaction is t2
+
+            assert connection.connection._reset_agent is t1
+            t1.close()
+            assert connection.connection._reset_agent is None
+        assert not t1.is_active
+
+    @testing.requires.savepoints
+    def test_begin_nested_trans_rollback(self):
+        with testing.db.connect() as connection:
+            t1 = connection.begin()
+            assert connection.connection._reset_agent is t1
+            t2 = connection.begin_nested()
+            assert connection.connection._reset_agent is t1
+            assert connection._Connection__transaction is t2
+            t2.close()
+            assert connection._Connection__transaction is t1
+            assert connection.connection._reset_agent is t1
+            t1.rollback()
+            assert connection.connection._reset_agent is None
+        assert not t1.is_active
+
     @testing.requires.savepoints
     def test_begin_nested_close(self):
         with testing.db.connect() as connection:
@@ -716,7 +787,7 @@ class ExplicitAutoCommitTest(fixtures.TestBase):
     """test the 'autocommit' flag on select() and text() objects.
 
     Requires PostgreSQL so that we may define a custom function which
-    modifies the database. """
+    modifies the database."""
 
     __only_on__ = "postgresql"
 
@@ -837,28 +908,19 @@ class IsolationLevelTest(fixtures.TestBase):
     __backend__ = True
 
     def _default_isolation_level(self):
-        if testing.against("sqlite"):
-            return "SERIALIZABLE"
-        elif testing.against("postgresql"):
-            return "READ COMMITTED"
-        elif testing.against("mysql"):
-            return "REPEATABLE READ"
-        elif testing.against("mssql"):
-            return "READ COMMITTED"
-        else:
-            assert False, "default isolation level not known"
+        return testing.requires.get_isolation_levels(testing.config)["default"]
 
     def _non_default_isolation_level(self):
-        if testing.against("sqlite"):
-            return "READ UNCOMMITTED"
-        elif testing.against("postgresql"):
-            return "SERIALIZABLE"
-        elif testing.against("mysql"):
-            return "SERIALIZABLE"
-        elif testing.against("mssql"):
-            return "SERIALIZABLE"
+        levels = testing.requires.get_isolation_levels(testing.config)
+
+        default = levels["default"]
+        supported = levels["supported"]
+
+        s = set(supported).difference(["AUTOCOMMIT", default])
+        if s:
+            return s.pop()
         else:
-            assert False, "non default isolation level not known"
+            assert False, "no non-default isolation level available"
 
     def test_engine_param_stays(self):
 
@@ -1042,6 +1104,17 @@ class IsolationLevelTest(fixtures.TestBase):
                 "isolation_level": self._non_default_isolation_level()
             },
         )
+        conn = eng.connect()
+        eq_(
+            eng.dialect.get_isolation_level(conn.connection),
+            self._non_default_isolation_level(),
+        )
+
+    def test_per_option_engine(self):
+        eng = create_engine(testing.db.url).execution_options(
+            isolation_level=self._non_default_isolation_level()
+        )
+
         conn = eng.connect()
         eq_(
             eng.dialect.get_isolation_level(conn.connection),

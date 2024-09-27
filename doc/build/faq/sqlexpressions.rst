@@ -12,7 +12,7 @@ How do I render SQL expressions as strings, possibly with bound parameters inlin
 ------------------------------------------------------------------------------------
 
 The "stringification" of a SQLAlchemy Core statement object or
-expression fragment, as well as that of an ORM :class:`.Query` object,
+expression fragment, as well as that of an ORM :class:`_query.Query` object,
 in the majority of simple cases is as simple as using
 the ``str()`` builtin function, as below when use it with the ``print``
 function (note the Python ``print`` function also calls ``str()`` automatically
@@ -26,8 +26,8 @@ if we don't use it explicitly)::
     FROM my_table
 
 The ``str()`` builtin, or an equivalent, can be invoked on ORM
-:class:`.Query`  object as well as any statement such as that of
-:func:`.select`, :func:`.insert` etc. and also any expression fragment, such
+:class:`_query.Query`  object as well as any statement such as that of
+:func:`_expression.select`, :func:`_expression.insert` etc. and also any expression fragment, such
 as::
 
     >>> from sqlalchemy import column
@@ -44,7 +44,7 @@ In these cases, we might get a stringified statement that is not in the correct
 syntax for the database we are targeting, or the operation may raise a
 :class:`.UnsupportedCompilationError` exception.   In these cases, it is
 necessary that we stringify the statement using the
-:meth:`.ClauseElement.compile` method, while passing along an :class:`.Engine`
+:meth:`_expression.ClauseElement.compile` method, while passing along an :class:`_engine.Engine`
 or :class:`.Dialect` object that represents the target database.  Such as
 below, if we have a MySQL database engine, we can stringify a statement in
 terms of the MySQL dialect::
@@ -54,7 +54,7 @@ terms of the MySQL dialect::
     engine = create_engine("mysql+pymysql://scott:tiger@localhost/test")
     print(statement.compile(engine))
 
-More directly, without building up an :class:`.Engine` object we can
+More directly, without building up an :class:`_engine.Engine` object we can
 instantiate a :class:`.Dialect` object directly, as below where we
 use a PostgreSQL dialect::
 
@@ -62,7 +62,7 @@ use a PostgreSQL dialect::
     print(statement.compile(dialect=postgresql.dialect()))
 
 When given an ORM :class:`~.orm.query.Query` object, in order to get at the
-:meth:`.ClauseElement.compile`
+:meth:`_expression.ClauseElement.compile`
 method we only need access the :attr:`~.orm.query.Query.statement`
 accessor first::
 
@@ -95,12 +95,19 @@ flag, passed to ``compile_kwargs``::
 
     s = select([t]).where(t.c.x == 5)
 
-    print(s.compile(compile_kwargs={"literal_binds": True}))  # **do not use** with untrusted input!!!
+    # **do not use** with untrusted input!!!
+    print(s.compile(compile_kwargs={"literal_binds": True}))
 
-the above approach has the caveats that it is only supported for basic
+The above approach has the caveats that it is only supported for basic
 types, such as ints and strings, and furthermore if a :func:`.bindparam`
 without a pre-set value is used directly, it won't be able to
 stringify that either.
+
+This functionality is provided mainly for
+logging or debugging purposes, where having the raw sql string of a query
+may prove useful.  Note that the ``dialect`` parameter should also
+passed to the :meth:`_expression.ClauseElement.compile` method to render
+the query that will be sent to the database.
 
 To support inline literal rendering for types not supported, implement
 a :class:`.TypeDecorator` for the target type which includes a
@@ -119,16 +126,69 @@ a :class:`.TypeDecorator` for the target type which includes a
 
     tab = Table('mytable', MetaData(), Column('x', MyFancyType()))
 
-    print(
-        tab.select().where(tab.c.x > 5).compile(
-            compile_kwargs={"literal_binds": True})
-    )
+    stmt = tab.select().where(tab.c.x > 5)
+    print(stmt.compile(compile_kwargs={"literal_binds": True}))
 
 producing output like::
 
     SELECT mytable.x
     FROM mytable
     WHERE mytable.x > my_fancy_formatting(5)
+
+
+.. _faq_sql_expression_percent_signs:
+
+Why are percent signs being doubled up when stringifying SQL statements?
+------------------------------------------------------------------------
+
+Many :term:`DBAPI` implementations make use of the ``pyformat`` or ``format``
+`paramstyle <https://www.python.org/dev/peps/pep-0249/#paramstyle>`_, which
+necessarily involve percent signs in their syntax.  Most DBAPIs that do this
+expect percent signs used for other reasons to be doubled up (i.e. escaped) in
+the string form of the statements used, e.g.::
+
+    SELECT a, b FROM some_table WHERE a = %s AND c = %s AND num %% modulus = 0
+
+When SQL statements are passed to the underlying DBAPI by SQLAlchemy,
+substitution of bound parameters works in the same way as the Python string
+interpolation operator ``%``, and in many cases the DBAPI actually uses this
+operator directly.  Above, the substitution of bound parameters would then look
+like::
+
+    SELECT a, b FROM some_table WHERE a = 5 AND c = 10 AND num % modulus = 0
+
+The default compilers for databases like PostgreSQL (default DBAPI is psycopg2)
+and MySQL (default DBAPI is mysqlclient) will have this percent sign
+escaping behavior::
+
+    >>> from sqlalchemy import table, column
+    >>> from sqlalchemy.dialects import postgresql
+    >>> t = table("my_table", column("value % one"), column("value % two"))
+    >>> print(t.select().compile(dialect=postgresql.dialect()))
+    SELECT my_table."value %% one", my_table."value %% two"
+    FROM my_table
+
+When such a dialect is being used, if non-DBAPI statements are desired that
+don't include bound parameter symbols, one quick way to remove the percent
+signs is to simply substitute in an empty set of parameters using Python's
+``%`` operator directly::
+
+    >>> strstmt = str(t.select().compile(dialect=postgresql.dialect()))
+    >>> print(strstmt % ())
+    SELECT my_table."value % one", my_table."value % two"
+    FROM my_table
+
+The other is to set a different parameter style on the dialect being used; all
+:class:`.Dialect` implementations accept a parameter
+``paramstyle`` which will cause the compiler for that
+dialect to use the given parameter style.  Below, the very common ``named``
+parameter style is set within the dialect used for the compilation so that
+percent signs are no longer significant in the compiled form of SQL, and will
+no longer be escaped::
+
+    >>> print(t.select().compile(dialect=postgresql.dialect(paramstyle="named")))
+    SELECT my_table."value % one", my_table."value % two"
+    FROM my_table
 
 
 .. _faq_sql_expression_op_parenthesis:
@@ -160,7 +220,7 @@ SQLAlchemy operator is currently 15::
 
 We can also usually force parenthesization around a binary expression (e.g.
 an expression that has left/right operands and an operator) using the
-:meth:`.ColumnElement.self_group` method::
+:meth:`_expression.ColumnElement.self_group` method::
 
     >>> print((column('q1') + column('q2')).self_group().op('->')(column('p')))
     (q1 + q2) -> p
@@ -201,16 +261,16 @@ What if we defaulted the value of :paramref:`.Operators.op.precedence` to 100,
 e.g. the highest?  Then this expression makes more parenthesis, but is
 otherwise OK, that is, these two are equivalent::
 
-    >>> print (column('q') - column('y')).op('+', precedence=100)(column('z'))
+    >>> print((column('q') - column('y')).op('+', precedence=100)(column('z')))
     (q - y) + z
-    >>> print (column('q') - column('y')).op('+')(column('z'))
+    >>> print((column('q') - column('y')).op('+')(column('z')))
     q - y + z
 
 but these two are not::
 
-    >>> print column('q') - column('y').op('+', precedence=100)(column('z'))
+    >>> print(column('q') - column('y').op('+', precedence=100)(column('z')))
     q - y + z
-    >>> print column('q') - column('y').op('+')(column('z'))
+    >>> print(column('q') - column('y').op('+')(column('z')))
     q - (y + z)
 
 For now, it's not clear that as long as we are doing parenthesization based on

@@ -771,7 +771,10 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
         )
 
     def test_single_prop_4(self):
-        Order, User, = (self.classes.Order, self.classes.User)
+        (
+            Order,
+            User,
+        ) = (self.classes.Order, self.classes.User)
 
         sess = create_session()
         oalias1 = aliased(Order)
@@ -787,7 +790,10 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
         )
 
     def test_single_prop_5(self):
-        Order, User, = (self.classes.Order, self.classes.User)
+        (
+            Order,
+            User,
+        ) = (self.classes.Order, self.classes.User)
 
         sess = create_session()
         self.assert_compile(
@@ -829,7 +835,10 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
         )
 
     def test_single_prop_8(self):
-        Order, User, = (self.classes.Order, self.classes.User)
+        (
+            Order,
+            User,
+        ) = (self.classes.Order, self.classes.User)
 
         sess = create_session()
         # same as before using an aliased() for User as well
@@ -1338,9 +1347,9 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
 
         assert_raises_message(
             sa.exc.InvalidRequestError,
-            "Don't know how to join to .*Item.*; "
-            "please use an ON clause to more clearly establish the "
-            "left side of this join",
+            "Don't know how to join to .*Item.*. "
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             q.join,
             Item,
         )
@@ -1353,9 +1362,9 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
 
         assert_raises_message(
             sa.exc.InvalidRequestError,
-            "Don't know how to join to .*Item.*; "
-            "please use an ON clause to more clearly establish the "
-            "left side of this join",
+            "Don't know how to join to .*Item.*. "
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             q.join,
             Item,
         )
@@ -1375,9 +1384,9 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
 
         assert_raises_message(
             sa.exc.InvalidRequestError,
-            "Don't know how to join to .*Item.*; "
-            "please use an ON clause to more clearly establish the "
-            "left side of this join",
+            "Don't know how to join to .*Item.*. "
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             q.join,
             Item,
         )
@@ -1473,7 +1482,8 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
             sa.exc.InvalidRequestError,
             "Can't determine which FROM clause to join from, there are "
             "multiple FROMS which can join to this entity. "
-            "Try adding an explicit ON clause to help resolve the ambiguity.",
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             q.join,
             a1,
         )
@@ -1529,7 +1539,8 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
             sa.exc.InvalidRequestError,
             "Can't determine which FROM clause to join from, there are "
             "multiple FROMS which can join to this entity. "
-            "Try adding an explicit ON clause to help resolve the ambiguity.",
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             q.join,
             a1,
         )
@@ -1580,7 +1591,8 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
             sa.exc.InvalidRequestError,
             "Can't determine which FROM clause to join from, there are "
             "multiple FROMS which can join to this entity. "
-            "Try adding an explicit ON clause to help resolve the ambiguity.",
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             q.outerjoin,
             a1,
         )
@@ -2369,14 +2381,18 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
 
         assert_raises_message(
             sa_exc.InvalidRequestError,
-            "Don't know how to join to .*User.* please use an ON clause to ",
+            "Don't know how to join to .*User.*. "
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             sess.query(users.c.id).join,
             User,
         )
 
         assert_raises_message(
             sa_exc.InvalidRequestError,
-            "Don't know how to join to .*User.* please use an ON clause to ",
+            "Don't know how to join to .*User.* "
+            r"Please use the .select_from\(\) "
+            "method to establish an explicit left side, as well as",
             sess.query(users.c.id).select_from(users).join,
             User,
         )
@@ -2391,6 +2407,20 @@ class JoinTest(QueryTest, AssertsCompiledSQL):
             "Expected mapped entity or selectable/table as join target",
             sess.query(User).join,
             User.id == Address.user_id,
+        )
+
+    def test_on_clause_no_right_side_two(self):
+        User = self.classes.User
+        Address = self.classes.Address
+        sess = create_session()
+
+        right = Address.user_id
+
+        assert_raises_message(
+            sa_exc.ArgumentError,
+            "Join target %s does not refer to a mapped entity" % right,
+            sess.query(User).join,
+            Address.user_id,
         )
 
     def test_select_from(self):
@@ -3085,10 +3115,10 @@ class SelfReferentialTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Node = cls.classes.Node
 
-        sess = create_session()
+        sess = create_session(connection)
         n1 = Node(data="n1")
         n1.append(Node(data="n11"))
         n1.append(Node(data="n12"))
@@ -3795,7 +3825,7 @@ class SelfReferentialM2MTest(fixtures.MappedTest):
             pass
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Node, nodes, node_to_nodes = (
             cls.classes.Node,
             cls.tables.nodes,
@@ -3815,7 +3845,7 @@ class SelfReferentialM2MTest(fixtures.MappedTest):
                 )
             },
         )
-        sess = create_session()
+        sess = create_session(connection)
         n1 = Node(data="n1")
         n2 = Node(data="n2")
         n3 = Node(data="n3")

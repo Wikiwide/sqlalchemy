@@ -6,19 +6,18 @@
 Collection Configuration and Techniques
 =======================================
 
-The :func:`.relationship` function defines a linkage between two classes.
+The :func:`_orm.relationship` function defines a linkage between two classes.
 When the linkage defines a one-to-many or many-to-many relationship, it's
 represented as a Python collection when objects are loaded and manipulated.
 This section presents additional information about collection configuration
 and techniques.
 
 .. _largecollections:
-.. currentmodule:: sqlalchemy.orm
 
 Working with Large Collections
 ==============================
 
-The default behavior of :func:`.relationship` is to fully load
+The default behavior of :func:`_orm.relationship` is to fully load
 the collection of items in, as according to the loading strategy of the
 relationship. Additionally, the :class:`.Session` by default only knows how to delete
 objects which are actually present within the session. When a parent instance
@@ -67,7 +66,7 @@ enabled on the :class:`.Session` in use, this will occur
 automatically each time the collection is about to emit a
 query.
 
-To place a dynamic relationship on a backref, use the :func:`~.orm.backref`
+To place a dynamic relationship on a backref, use the :func:`_orm.backref`
 function in conjunction with ``lazy='dynamic'``::
 
     class Post(Base):
@@ -81,8 +80,8 @@ Note that eager/lazy loading options cannot be used in conjunction dynamic relat
 
 .. note::
 
-   The :func:`~.orm.dynamic_loader` function is essentially the same
-   as :func:`~.orm.relationship` with the ``lazy='dynamic'`` argument specified.
+   The :func:`_orm.dynamic_loader` function is essentially the same
+   as :func:`_orm.relationship` with the ``lazy='dynamic'`` argument specified.
 
 .. warning::
 
@@ -109,7 +108,7 @@ be persisted to the database as well as locally available for reading at the
 time they are added. However when instances of ``MyClass`` are freshly loaded
 from the database, the ``children`` collection stays empty.   The noload
 strategy is also available on a query option basis using the
-:func:`.orm.noload` loader option.
+:func:`_orm.noload` loader option.
 
 Alternatively, a "raise"-loaded relationship will raise an
 :exc:`~sqlalchemy.exc.InvalidRequestError` where the attribute would normally
@@ -128,7 +127,7 @@ application is not emitting any unexpected lazy loads within a certain context.
 Rather than having to read through SQL logs to determine that all necessary
 attributes were eager loaded, the "raise" strategy will cause unloaded
 attributes to raise immediately if accessed.  The raise strategy is
-also available on a query option basis using the :func:`.orm.raiseload`
+also available on a query option basis using the :func:`_orm.raiseload`
 loader option.
 
 .. versionadded:: 1.1 added the "raise" loader strategy.
@@ -137,54 +136,14 @@ loader option.
 
     :ref:`prevent_lazy_with_raiseload`
 
-.. _passive_deletes:
-
 Using Passive Deletes
 ---------------------
 
-Use :paramref:`~.relationship.passive_deletes` to disable child object loading on a DELETE
-operation, in conjunction with "ON DELETE (CASCADE|SET NULL)" on your database
-to automatically cascade deletes to child objects::
+See :ref:`passive_deletes` for this section.
 
-    class MyClass(Base):
-        __tablename__ = 'mytable'
-        id = Column(Integer, primary_key=True)
-        children = relationship("MyOtherClass",
-                        cascade="all, delete-orphan",
-                        passive_deletes=True)
-
-    class MyOtherClass(Base):
-        __tablename__ = 'myothertable'
-        id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer,
-                    ForeignKey('mytable.id', ondelete='CASCADE')
-                        )
-
-
-.. note::
-
-    To use "ON DELETE CASCADE", the underlying database engine must
-    support foreign keys.
-
-    * When using MySQL, an appropriate storage engine must be
-      selected.  See :ref:`mysql_storage_engines` for details.
-
-    * When using SQLite, foreign key support must be enabled explicitly.
-      See :ref:`sqlite_foreign_keys` for details.
-
-When :paramref:`~.relationship.passive_deletes` is applied, the ``children`` relationship will not be
-loaded into memory when an instance of ``MyClass`` is marked for deletion. The
-``cascade="all, delete-orphan"`` *will* take effect for instances of
-``MyOtherClass`` which are currently present in the session; however for
-instances of ``MyOtherClass`` which are not loaded, SQLAlchemy assumes that
-"ON DELETE CASCADE" rules will ensure that those rows are deleted by the
-database.
-
-.. seealso::
-
-    :paramref:`.orm.mapper.passive_deletes` - similar feature on :func:`.mapper`
 
 .. currentmodule:: sqlalchemy.orm.collections
+
 .. _custom_collections:
 
 Customizing Collection Access
@@ -206,7 +165,7 @@ this collection is a ``list``::
 
 Collections are not limited to lists. Sets, mutable sequences and almost any
 other Python object that can act as a container can be used in place of the
-default list, by specifying the :paramref:`~.relationship.collection_class` option on
+default list, by specifying the :paramref:`_orm.relationship.collection_class` option on
 :func:`~sqlalchemy.orm.relationship`::
 
     class Parent(Base):
@@ -314,7 +273,7 @@ is added to the ``Item.notes`` dictionary and the key is generated for us automa
     {('a', 'atext'): <__main__.Note object at 0x2eaaf0>}
 
 Other built-in dictionary types include :func:`.column_mapped_collection`,
-which is almost like :func:`.attribute_mapped_collection` except given the :class:`.Column`
+which is almost like :func:`.attribute_mapped_collection` except given the :class:`_schema.Column`
 object directly::
 
     from sqlalchemy.orm.collections import column_mapped_collection
@@ -343,6 +302,88 @@ Dictionary mappings are often combined with the "Association Proxy" extension to
 streamlined dictionary views.  See :ref:`proxying_dictionaries` and :ref:`composite_association_proxy`
 for examples.
 
+.. _key_collections_mutations:
+
+Dealing with Key Mutations and back-populating for Dictionary collections
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When using :func:`.attribute_mapped_collection`, the "key" for the dictionary
+is taken from an attribute on the target object.   **Changes to this key
+are not tracked**.  This means that the key must be assigned towards when
+it is first used, and if the key changes, the collection will not be mutated.
+A typical example where this might be an issue is when relying upon backrefs
+to populate an attribute mapped collection.  Given the following::
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id = Column(Integer, primary_key=True)
+        bs = relationship(
+            "B",
+            collection_class=attribute_mapped_collection("data"),
+            back_populates="a",
+        )
+
+
+    class B(Base):
+        __tablename__ = "b"
+        id = Column(Integer, primary_key=True)
+        a_id = Column(ForeignKey("a.id"))
+        data = Column(String)
+
+        a = relationship("A", back_populates="bs")
+
+Above, if we create a ``B()`` that refers to a specific ``A()``, the back
+populates will then add the ``B()`` to the ``A.bs`` collection, however
+if the value of ``B.data`` is not set yet, the key will be ``None``::
+
+    >>> a1 = A()
+    >>> b1 = B(a=a1)
+    >>> a1.bs
+    {None: <test3.B object at 0x7f7b1023ef70>}
+
+
+Setting ``b1.data`` after the fact does not update the collection::
+
+    >>> b1.data = 'the key'
+    >>> a1.bs
+    {None: <test3.B object at 0x7f7b1023ef70>}
+
+
+This can also be seen if one attempts to set up ``B()`` in the constructor.
+The order of arguments changes the result::
+
+    >>> B(a=a1, data='the key')
+    <test3.B object at 0x7f7b10114280>
+    >>> a1.bs
+    {None: <test3.B object at 0x7f7b10114280>}
+
+vs::
+
+    >>> B(data='the key', a=a1)
+    <test3.B object at 0x7f7b10114340>
+    >>> a1.bs
+    {'the key': <test3.B object at 0x7f7b10114340>}
+
+If backrefs are being used in this way, ensure that attributes are populated
+in the correct order using an ``__init__`` method.
+
+An event handler such as the following may also be used to track changes in the
+collection as well::
+
+    from sqlalchemy import event
+
+    from sqlalchemy.orm import attributes
+
+    @event.listens_for(B.data, "set")
+    def set_item(obj, value, previous, initiator):
+        if obj.a is not None:
+            previous = None if previous == attributes.NO_VALUE else previous
+            obj.a.bs[value] = obj
+            obj.a.bs.pop(previous)
+
+
+
 .. autofunction:: attribute_mapped_collection
 
 .. autofunction:: column_mapped_collection
@@ -365,7 +406,7 @@ about how the collection operates.
    step beyond and represents the data internally in some fashion, presenting
    a "view" of that data on the outside of a different form.
 
-   For the first use case, the :func:`.orm.validates` decorator is by far
+   For the first use case, the :func:`_orm.validates` decorator is by far
    the simplest way to intercept incoming values in all cases for the purposes
    of validation and simple marshaling.  See :ref:`simple_validators`
    for an example of this.
@@ -557,20 +598,6 @@ automatically instrument all dict-like methods if you choose to subclass
 must decorate appender and remover methods, however- there are no compatible
 methods in the basic dictionary interface for SQLAlchemy to use by default.
 Iteration will go through ``itervalues()`` unless otherwise decorated.
-
-.. note::
-
-   Due to a bug in MappedCollection prior to version 0.7.6, this
-   workaround usually needs to be called before a custom subclass
-   of :class:`.MappedCollection` which uses :meth:`.collection.internally_instrumented`
-   can be used::
-
-    from sqlalchemy.orm.collections import _instrument_class, MappedCollection
-    _instrument_class(MappedCollection)
-
-   This will ensure that the :class:`.MappedCollection` has been properly
-   initialized with custom ``__setitem__()`` and ``__delitem__()``
-   methods before used in a custom subclass.
 
 .. autoclass:: sqlalchemy.orm.collections.MappedCollection
    :members:

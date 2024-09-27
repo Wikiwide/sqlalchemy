@@ -38,7 +38,8 @@ ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError)
 if sys.platform == "win32":
     # 2.6's distutils.msvc9compiler can raise an IOError when failing to
     # find the compiler
-    ext_errors += (IOError,)
+    # for TypeError, see https://github.com/pypa/setuptools/issues/1902
+    ext_errors += (IOError, TypeError)
 
 
 class BuildFailed(Exception):
@@ -175,6 +176,8 @@ def run_setup(with_cext):
             "Programming Language :: Python :: 3.5",
             "Programming Language :: Python :: 3.6",
             "Programming Language :: Python :: 3.7",
+            "Programming Language :: Python :: 3.8",
+            "Programming Language :: Python :: 3.9",
             "Programming Language :: Python :: Implementation :: CPython",
             "Programming Language :: Python :: Implementation :: PyPy",
             "Topic :: Database :: Front-Ends",
@@ -183,10 +186,13 @@ def run_setup(with_cext):
         distclass=Distribution,
         extras_require={
             "mysql": ["mysqlclient"],
-            "pymysql": ["pymysql"],
+            "pymysql": [
+                'pymysql; python_version>="3"',
+                'pymysql<1; python_version<"3"',
+            ],
             "postgresql": ["psycopg2"],
             "postgresql_psycopg2binary": ["psycopg2-binary"],
-            "postgresql_pg8000": ["pg8000"],
+            "postgresql_pg8000": ["pg8000<1.16.6"],
             "postgresql_psycopg2cffi": ["psycopg2cffi"],
             "oracle": ["cx_oracle"],
             "mssql_pyodbc": ["pyodbc"],

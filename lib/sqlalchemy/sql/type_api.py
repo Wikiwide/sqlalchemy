@@ -1,5 +1,5 @@
 # sql/types_api.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -45,6 +45,8 @@ class TypeEngine(Visitable):
 
     _sqla_type = True
     _isnull = False
+    _is_array = False
+    _is_type_decorator = False
 
     class Comparator(operators.ColumnOperators):
         """Base class for custom comparison operations defined at the
@@ -77,7 +79,8 @@ class TypeEngine(Visitable):
 
             This method determines the type of a resulting binary expression
             given two source types and an operator.   For example, two
-            :class:`.Column` objects, both of the type :class:`.Integer`, will
+            :class:`_schema.Column` objects, both of the type
+            :class:`.Integer`, will
             produce a :class:`.BinaryExpression` that also has the type
             :class:`.Integer` when compared via the addition (``+``) operator.
             However, using the addition operator with an :class:`.Integer`
@@ -111,7 +114,8 @@ class TypeEngine(Visitable):
 
     comparator_factory = Comparator
     """A :class:`.TypeEngine.Comparator` class which will apply
-    to operations performed by owning :class:`.ColumnElement` objects.
+    to operations performed by owning :class:`_expression.ColumnElement`
+    objects.
 
     The :attr:`.comparator_factory` attribute is a hook consulted by
     the core expression system when column and SQL expression operations
@@ -129,6 +133,16 @@ class TypeEngine(Visitable):
     Rudimentary usage of this hook is allowed through simple subclassing
     of existing types, or alternatively by using :class:`.TypeDecorator`.
     See the documentation section :ref:`types_operators` for examples.
+
+    """
+
+    sort_key_function = None
+    """A sorting function that can be passed as the key to sorted.
+
+    The default value of ``None`` indicates that the values stored by
+    this type are self-sorting.
+
+    .. versionadded:: 1.3.8
 
     """
 
@@ -180,14 +194,15 @@ class TypeEngine(Visitable):
 
         In all cases, the actual NULL SQL value can be always be
         persisted in any column by using
-        the :obj:`~.expression.null` SQL construct in an INSERT statement
+        the :obj:`_expression.null` SQL construct in an INSERT statement
         or associated with an ORM-mapped attribute.
 
         .. note::
 
             The "evaluates none" flag does **not** apply to a value
-            of ``None`` passed to :paramref:`.Column.default` or
-            :paramref:`.Column.server_default`; in these cases, ``None``
+            of ``None`` passed to :paramref:`_schema.Column.default` or
+            :paramref:`_schema.Column.server_default`; in these cases,
+            ``None``
             still means "no default".
 
         .. versionadded:: 1.1
@@ -319,7 +334,7 @@ class TypeEngine(Visitable):
         )
 
     def bind_expression(self, bindvalue):
-        """"Given a bind value (i.e. a :class:`.BindParameter` instance),
+        """Given a bind value (i.e. a :class:`.BindParameter` instance),
         return a SQL expression in its place.
 
         This is typically a SQL function that wraps the existing bound
@@ -371,7 +386,7 @@ class TypeEngine(Visitable):
         """Return the corresponding type object from the underlying DB-API, if
         any.
 
-         This can be useful for calling ``setinputsizes()``, for example.
+        This can be useful for calling ``setinputsizes()``, for example.
 
         """
         return None
@@ -466,9 +481,12 @@ class TypeEngine(Visitable):
         try:
             return dialect._type_memos[self]["literal"]
         except KeyError:
-            d = self._dialect_info(dialect)
-            d["literal"] = lp = d["impl"].literal_processor(dialect)
-            return lp
+            pass
+        # avoid KeyError context coming into literal_processor() function
+        # raises
+        d = self._dialect_info(dialect)
+        d["literal"] = lp = d["impl"].literal_processor(dialect)
+        return lp
 
     def _cached_bind_processor(self, dialect):
         """Return a dialect-specific bind processor for this type."""
@@ -476,9 +494,12 @@ class TypeEngine(Visitable):
         try:
             return dialect._type_memos[self]["bind"]
         except KeyError:
-            d = self._dialect_info(dialect)
-            d["bind"] = bp = d["impl"].bind_processor(dialect)
-            return bp
+            pass
+        # avoid KeyError context coming into bind_processor() function
+        # raises
+        d = self._dialect_info(dialect)
+        d["bind"] = bp = d["impl"].bind_processor(dialect)
+        return bp
 
     def _cached_result_processor(self, dialect, coltype):
         """Return a dialect-specific result processor for this type."""
@@ -486,21 +507,27 @@ class TypeEngine(Visitable):
         try:
             return dialect._type_memos[self][coltype]
         except KeyError:
-            d = self._dialect_info(dialect)
-            # key assumption: DBAPI type codes are
-            # constants.  Else this dictionary would
-            # grow unbounded.
-            d[coltype] = rp = d["impl"].result_processor(dialect, coltype)
-            return rp
+            pass
+        # avoid KeyError context coming into result_processor() function
+        # raises
+        d = self._dialect_info(dialect)
+        # key assumption: DBAPI type codes are
+        # constants.  Else this dictionary would
+        # grow unbounded.
+        d[coltype] = rp = d["impl"].result_processor(dialect, coltype)
+        return rp
 
     def _cached_custom_processor(self, dialect, key, fn):
         try:
             return dialect._type_memos[self][key]
         except KeyError:
-            d = self._dialect_info(dialect)
-            impl = d["impl"]
-            d[key] = result = fn(impl)
-            return result
+            pass
+        # avoid KeyError context coming into fn() function
+        # raises
+        d = self._dialect_info(dialect)
+        impl = d["impl"]
+        d[key] = result = fn(impl)
+        return result
 
     def _dialect_info(self, dialect):
         """Return a dialect-specific registry which
@@ -639,7 +666,7 @@ class UserDefinedType(util.with_metaclass(VisitableCheckKWArg, TypeEngine)):
 
     The ``get_col_spec()`` method will in most cases receive a keyword
     argument ``type_expression`` which refers to the owning expression
-    of the type as being compiled, such as a :class:`.Column` or
+    of the type as being compiled, such as a :class:`_schema.Column` or
     :func:`.cast` construct.  This keyword is only sent if the method
     accepts keyword arguments (e.g. ``**kw``) in its argument signature;
     introspection is used to check for this in order to support legacy
@@ -783,10 +810,10 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
           def copy(self, **kw):
               return MyType(self.impl.length)
 
-    The class-level "impl" attribute is required, and can reference any
-    TypeEngine class.  Alternatively, the load_dialect_impl() method
-    can be used to provide different type classes based on the dialect
-    given; in this case, the "impl" variable can reference
+    The class-level ``impl`` attribute is required, and can reference any
+    :class:`.TypeEngine` class.  Alternatively, the :meth:`load_dialect_impl`
+    method can be used to provide different type classes based on the dialect
+    given; in this case, the ``impl`` variable can reference
     ``TypeEngine`` as a placeholder.
 
     Types that receive a Python type that isn't similar to the ultimate type
@@ -841,7 +868,7 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
        If the :class:`.TypeDecorator` is augmenting a
        type that requires special logic for certain types of operators,
        this method **must** be overridden.  A key example is when decorating
-       the :class:`.postgresql.JSON` and :class:`.postgresql.JSONB` types;
+       the :class:`_postgresql.JSON` and :class:`_postgresql.JSONB` types;
        the default rules of :meth:`.TypeEngine.coerce_compared_value` should
        be used in order to deal with operators like index operations::
 
@@ -857,6 +884,8 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
     """
 
     __visit_name__ = "type_decorator"
+
+    _is_type_decorator = True
 
     def __init__(self, *args, **kwargs):
         """Construct a :class:`.TypeDecorator`.
@@ -888,7 +917,7 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
     coerce_to_is_types = (util.NoneType,)
     """Specify those Python types which should be coerced at the expression
     level to "IS <constant>" when compared using ``==`` (and same for
-    ``IS NOT`` in conjunction with ``!=``.
+    ``IS NOT`` in conjunction with ``!=``).
 
     For most SQLAlchemy types, this includes ``NoneType``, as well as
     ``bool``.
@@ -966,18 +995,20 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
         """
         return self.impl._type_affinity
 
-    def _set_parent(self, column):
+    def _set_parent(self, column, outer=False, **kw):
         """Support SchemaEventTarget"""
 
         super(TypeDecorator, self)._set_parent(column)
 
-        if isinstance(self.impl, SchemaEventTarget):
-            self.impl._set_parent(column)
+        if not outer and isinstance(self.impl, SchemaEventTarget):
+            self.impl._set_parent(column, outer=False, **kw)
 
     def _set_parent_with_dispatch(self, parent):
         """Support SchemaEventTarget"""
 
-        super(TypeDecorator, self)._set_parent_with_dispatch(parent)
+        super(TypeDecorator, self)._set_parent_with_dispatch(
+            parent, outer=True
+        )
 
         if isinstance(self.impl, SchemaEventTarget):
             self.impl._set_parent_with_dispatch(parent)
@@ -988,8 +1019,7 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
 
         In most cases this returns a dialect-adapted form of
         the :class:`.TypeEngine` type represented by ``self.impl``.
-        Makes usage of :meth:`dialect_impl` but also traverses
-        into wrapped :class:`.TypeDecorator` instances.
+        Makes usage of :meth:`dialect_impl`.
         Behavior can be customized here by overriding
         :meth:`load_dialect_impl`.
 
@@ -997,8 +1027,6 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
         adapted = dialect.type_descriptor(self)
         if not isinstance(adapted, type(self)):
             return adapted
-        elif isinstance(self.impl, TypeDecorator):
-            return self.impl.type_engine(dialect)
         else:
             return self.load_dialect_impl(dialect)
 
@@ -1119,10 +1147,7 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
 
     @util.memoized_property
     def _has_literal_processor(self):
-        """memoized boolean, check if process_literal_param is implemented.
-
-
-        """
+        """memoized boolean, check if process_literal_param is implemented."""
 
         return (
             self.__class__.process_literal_param.__code__
@@ -1347,6 +1372,10 @@ class TypeDecorator(SchemaEventTarget, TypeEngine):
         """
         return self.impl.compare_values(x, y)
 
+    @property
+    def sort_key_function(self):
+        return self.impl.sort_key_function
+
     def __repr__(self):
         return util.generic_repr(self, to_inspect=self.impl)
 
@@ -1386,14 +1415,14 @@ class Variant(TypeDecorator):
         else:
             return self.impl
 
-    def _set_parent(self, column):
+    def _set_parent(self, column, outer=False, **kw):
         """Support SchemaEventTarget"""
 
         if isinstance(self.impl, SchemaEventTarget):
-            self.impl._set_parent(column)
+            self.impl._set_parent(column, **kw)
         for impl in self.mapping.values():
             if isinstance(impl, SchemaEventTarget):
-                impl._set_parent(column)
+                impl._set_parent(column, **kw)
 
     def _set_parent_with_dispatch(self, parent):
         """Support SchemaEventTarget"""

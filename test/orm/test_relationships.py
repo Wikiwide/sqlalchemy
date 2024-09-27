@@ -27,6 +27,7 @@ from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relation
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import remote
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import subqueryload
@@ -41,6 +42,8 @@ from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import startswith_
+from sqlalchemy.testing.assertsql import assert_engine
+from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
@@ -277,7 +280,7 @@ class DependencyTwoParentTest(fixtures.MappedTest):
         mapper(D, tbl_d, properties=dict(b_row=relationship(B)))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, C, B, D = (
             cls.classes.A,
             cls.classes.C,
@@ -285,7 +288,7 @@ class DependencyTwoParentTest(fixtures.MappedTest):
             cls.classes.D,
         )
 
-        session = create_session()
+        session = create_session(connection)
         a = A(name="a1")
         b = B(name="b1")
         c = C(name="c1", a_row=a)
@@ -429,11 +432,11 @@ class DirectSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
 
     this is an **extremely** unusual case::
 
-    Entity
-    ------
-     path -------+
-       ^         |
-       +---------+
+        Entity
+        ------
+         path -------+
+           ^         |
+           +---------+
 
     In this case, one-to-many and many-to-one are no longer accurate.
     Both relationships return collections.   I'm not sure if this is a good
@@ -2351,7 +2354,7 @@ class JoinConditionErrorTest(fixtures.TestBase):
 class TypeMatchTest(fixtures.MappedTest):
 
     """test errors raised when trying to add items
-        whose type is not handled by a relationship"""
+    whose type is not handled by a relationship"""
 
     @classmethod
     def define_tables(cls, metadata):
@@ -2701,6 +2704,13 @@ class ViewOnlyHistoryTest(fixtures.MappedTest):
         )
         mapper(B, self.tables.t2)
 
+        with testing.expect_warnings(
+            "Setting backref / back_populates on relationship B.a to refer "
+            "to viewonly relationship A.bs should include sync_backref=False "
+            "set on the B.a relationship."
+        ):
+            configure_mappers()
+
         a1 = A()
         b1 = B()
         a1.bs.append(b1)
@@ -2731,6 +2741,13 @@ class ViewOnlyHistoryTest(fixtures.MappedTest):
             },
         )
         mapper(B, self.tables.t2)
+
+        with testing.expect_warnings(
+            "Setting backref / back_populates on relationship A.bs to refer "
+            "to viewonly relationship B.a should include sync_backref=False "
+            "set on the A.bs relationship."
+        ):
+            configure_mappers()
 
         a1 = A()
         b1 = B()
@@ -2831,6 +2848,13 @@ class ViewOnlyM2MBackrefTest(fixtures.MappedTest):
             },
         )
         mapper(B, t2)
+
+        with testing.expect_warnings(
+            "Setting backref / back_populates on relationship A.bs to refer "
+            "to viewonly relationship B.as_ should include sync_backref=False "
+            "set on the A.bs relationship."
+        ):
+            configure_mappers()
 
         sess = create_session()
         a1 = A()
@@ -2934,6 +2958,186 @@ class ViewOnlyOverlappingNames(fixtures.MappedTest):
         c1 = sess.query(C1).get(c1.id)
         assert set([x.id for x in c1.t2s]) == set([c2a.id, c2b.id])
         assert set([x.id for x in c1.t2_view]) == set([c2b.id])
+
+
+class ViewOnlySyncBackref(fixtures.MappedTest):
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "t1",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(40)),
+        )
+        Table(
+            "t2",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(40)),
+            Column("t1id", Integer, ForeignKey("t1.id")),
+        )
+
+    class Case:
+        def __init__(
+            self,
+            Ba_err=False,
+            Abs_err=False,
+            map_err=False,
+            ctor_warn=False,
+            Ba_evt=False,
+            Abs_evt=False,
+        ):
+            self.B_a_init_error = Ba_err
+            self.A_bs_init_error = Abs_err
+            self.map_error = map_err
+            self.ctor_warn = ctor_warn
+            self.B_a_event = Ba_evt
+            self.A_bs_event = Abs_evt
+
+        def __repr__(self):
+            return str(self.__dict__)
+
+    cases = {
+        (0, 0, 0, 0): Case(),
+        (0, 0, 0, 1): Case(Abs_evt=1),
+        (0, 0, 1, 0): Case(),
+        (0, 0, 1, 1): Case(Abs_err=1),
+        (0, 1, 0, 0): Case(Ba_evt=1),
+        (0, 1, 0, 1): Case(Ba_evt=1, Abs_evt=1),
+        (0, 1, 1, 0): Case(map_err="BA"),
+        (0, 1, 1, 1): Case(Abs_err=1),
+        (1, 0, 0, 0): Case(),
+        (1, 0, 0, 1): Case(map_err="AB"),
+        (1, 0, 1, 0): Case(),
+        (1, 0, 1, 1): Case(Abs_err=1),
+        (1, 1, 0, 0): Case(Ba_err=1),
+        (1, 1, 0, 1): Case(Ba_err=1),
+        (1, 1, 1, 0): Case(Ba_err=1),
+        (1, 1, 1, 1): Case(Abs_err=1),
+        (0, None, 0, 0): Case(Ba_evt=1),
+        (0, None, 0, 1): Case(Ba_evt=1, Abs_evt=1),
+        (0, None, 1, 0): Case(ctor_warn="BA", Ba_evt=1),
+        (0, None, 1, 1): Case(Abs_err=1),
+        (1, None, 0, 0): Case(Ba_evt=1),
+        (1, None, 0, 1): Case(map_err="AB"),
+        (1, None, 1, 0): Case(ctor_warn="BA", Ba_evt=1),
+        (1, None, 1, 1): Case(Abs_err=1),
+        (0, 0, 0, None): Case(Abs_evt=1),
+        (0, 0, 1, None): Case(Abs_evt=1),
+        (0, 1, 0, None): Case(Ba_evt=1, Abs_evt=1),
+        (0, 1, 1, None): Case(map_err="BA"),
+        (1, 0, 0, None): Case(ctor_warn="AB", Abs_evt=1),
+        (1, 0, 1, None): Case(ctor_warn="AB", Abs_evt=1),
+        (1, 1, 0, None): Case(Ba_err=1),
+        (1, 1, 1, None): Case(Ba_err=1),
+        (0, None, 0, None): Case(Ba_evt=1, Abs_evt=1),
+        (0, None, 1, None): Case(ctor_warn="BA", Abs_evt=1, Ba_evt=1),
+        (1, None, 0, None): Case(ctor_warn="AB", Abs_evt=1, Ba_evt=1),
+        (1, None, 1, None): Case(ctor_warn="*", Abs_evt=1, Ba_evt=1),
+    }
+
+    @testing.combinations(True, False, None, argnames="A_bs_sync")
+    @testing.combinations(True, False, argnames="A_bs_view")
+    @testing.combinations(True, False, None, argnames="B_a_sync")
+    @testing.combinations(True, False, argnames="B_a_view")
+    def test_case(self, B_a_view, B_a_sync, A_bs_view, A_bs_sync):
+        class A(fixtures.ComparableEntity):
+            pass
+
+        class B(fixtures.ComparableEntity):
+            pass
+
+        case = self.cases[(B_a_view, B_a_sync, A_bs_view, A_bs_sync)]
+        print(
+            {
+                "B_a_view": B_a_view,
+                "B_a_sync": B_a_sync,
+                "A_bs_view": A_bs_view,
+                "A_bs_sync": A_bs_sync,
+            },
+            case,
+        )
+
+        def rel():
+            return relationship(
+                B,
+                viewonly=A_bs_view,
+                sync_backref=A_bs_sync,
+                backref=backref("a", viewonly=B_a_view, sync_backref=B_a_sync),
+            )
+
+        if case.A_bs_init_error:
+            assert_raises_message(
+                exc.ArgumentError,
+                "sync_backref and viewonly cannot both be True",
+                rel,
+            )
+            return
+
+        mapper(
+            A,
+            self.tables.t1,
+            properties={"bs": rel()},
+        )
+        mapper(B, self.tables.t2)
+
+        if case.B_a_init_error:
+            assert_raises_message(
+                exc.ArgumentError,
+                "sync_backref and viewonly cannot both be True",
+                configure_mappers,
+            )
+            return
+
+        if case.map_error:
+            if case.map_error == "AB":
+                args = ("A.bs", "B.a")
+            else:
+                args = ("B.a", "A.bs")
+            assert_raises_message(
+                exc.InvalidRequestError,
+                "Relationship %s cannot specify sync_backref=True since %s "
+                % args,
+                configure_mappers,
+            )
+            return
+
+        if case.ctor_warn:
+            warns = []
+            msg = (
+                "Setting backref / back_populates on relationship %s "
+                "to refer to viewonly relationship %s"
+            )
+            if case.ctor_warn in ("AB", "*"):
+                warns.append(msg % ("A.bs", "B.a"))
+            if case.ctor_warn in ("BA", "*"):
+                warns.append(msg % ("B.a", "A.bs"))
+            with testing.expect_warnings(*warns):
+                configure_mappers()
+        else:
+            configure_mappers()
+
+        a1 = A()
+        b1 = B()
+        b1.a = a1
+        assert (b1 in a1.bs) == case.B_a_event
+        assert inspect(a1).attrs.bs.history.has_changes() == (
+            case.B_a_event and not A_bs_view
+        )
+        assert inspect(b1).attrs.a.history.has_changes() == (not B_a_view)
+
+        a2 = A()
+        b2 = B()
+        a2.bs.append(b2)
+        assert (b2.a == a2) == case.A_bs_event
+        assert inspect(a2).attrs.bs.history.has_changes() == (not A_bs_view)
+        assert inspect(b2).attrs.a.history.has_changes() == (
+            case.A_bs_event and not B_a_view
+        )
 
 
 class ViewOnlyUniqueNames(fixtures.MappedTest):
@@ -3421,9 +3625,7 @@ class ViewOnlyComplexJoin(_RelationshipErrors, fixtures.MappedTest):
 
 
 class FunctionAsPrimaryJoinTest(fixtures.DeclarativeMappedTest):
-    """test :ticket:`3831`
-
-    """
+    """test :ticket:`3831`"""
 
     __only_on__ = "sqlite"
 
@@ -3447,9 +3649,9 @@ class FunctionAsPrimaryJoinTest(fixtures.DeclarativeMappedTest):
             )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Venue = cls.classes.Venue
-        s = Session()
+        s = Session(connection)
         s.add_all(
             [
                 Venue(name="parent1"),
@@ -3527,9 +3729,9 @@ class RemoteForeignBetweenColsTest(fixtures.DeclarativeMappedTest):
             ip_addr = Column(Integer, primary_key=True)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Network, Address = cls.classes.Network, cls.classes.Address
-        s = Session(testing.db)
+        s = Session(connection)
 
         s.add_all(
             [
@@ -4052,6 +4254,47 @@ class AmbiguousFKResolutionTest(_RelationshipErrors, fixtures.MappedTest):
         sa.orm.configure_mappers()
 
 
+class SecondaryArgTest(fixtures.TestBase):
+    def teardown(self):
+        clear_mappers()
+
+    @testing.combinations((True,), (False,))
+    def test_informative_message_on_cls_as_secondary(self, string):
+        Base = declarative_base()
+
+        class C(Base):
+            __tablename__ = "c"
+            id = Column(Integer, primary_key=True)
+            a_id = Column(ForeignKey("a.id"))
+            b_id = Column(ForeignKey("b.id"))
+
+        if string:
+            c_arg = "C"
+        else:
+            c_arg = C
+
+        class A(Base):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            data = Column(String)
+            bs = relationship("B", secondary=c_arg)
+
+        class B(Base):
+            __tablename__ = "b"
+            id = Column(Integer, primary_key=True)
+
+        assert_raises_message(
+            exc.ArgumentError,
+            r"secondary argument <class .*C.*> passed to to "
+            r"relationship\(\) A.bs "
+            "must be a Table object or other FROM clause; can't send a "
+            "mapped class directly as rows in 'secondary' are persisted "
+            "independently of a class that is mapped to that same table.",
+            configure_mappers,
+        )
+
+
 class SecondaryNestedJoinTest(
     fixtures.MappedTest, AssertsCompiledSQL, testing.AssertsExecutionResults
 ):
@@ -4148,9 +4391,9 @@ class SecondaryNestedJoinTest(
         mapper(D, d)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C, D = cls.classes.A, cls.classes.B, cls.classes.C, cls.classes.D
-        sess = Session()
+        sess = Session(connection)
         a1, a2, a3, a4 = A(name="a1"), A(name="a2"), A(name="a3"), A(name="a4")
         b1, b2, b3, b4 = B(name="b1"), B(name="b2"), B(name="b3"), B(name="b4")
         c1, c2, c3, c4 = C(name="c1"), C(name="c2"), C(name="c3"), C(name="c4")
@@ -4205,7 +4448,6 @@ class SecondaryNestedJoinTest(
         )
 
     def test_render_lazyload(self):
-        from sqlalchemy.testing.assertsql import CompiledSQL
 
         A = self.classes.A
         sess = Session()
@@ -5081,7 +5323,177 @@ class ActiveHistoryFlagTest(_fixtures.FixtureTest):
 class InactiveHistoryNoRaiseTest(_fixtures.FixtureTest):
     run_inserts = None
 
-    def _run_test(self, detached, raiseload, backref, active_history, delete):
+    @testing.flag_combinations(
+        dict(
+            detached=False,
+            raiseload=False,
+            backref=False,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=True,
+            raiseload=False,
+            backref=False,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=False,
+            raiseload=True,
+            backref=False,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=True,
+            raiseload=True,
+            backref=False,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=False,
+            raiseload=False,
+            backref=True,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=True,
+            raiseload=False,
+            backref=True,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=False,
+            raiseload=True,
+            backref=True,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=True,
+            raiseload=True,
+            backref=True,
+            delete=False,
+            active_history=False,
+        ),
+        dict(
+            detached=False,
+            raiseload=False,
+            backref=False,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=True,
+            raiseload=False,
+            backref=False,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=False,
+            raiseload=True,
+            backref=False,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=True,
+            raiseload=True,
+            backref=False,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=False,
+            raiseload=False,
+            backref=True,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=True,
+            raiseload=False,
+            backref=True,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=False,
+            raiseload=True,
+            backref=True,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=True,
+            raiseload=True,
+            backref=True,
+            delete=False,
+            active_history=True,
+        ),
+        dict(
+            detached=False,
+            raiseload=False,
+            backref=False,
+            delete=True,
+            active_history=False,
+        ),
+        dict(
+            detached=True,
+            raiseload=False,
+            backref=False,
+            delete=True,
+            active_history=False,
+        ),
+        dict(
+            detached=False,
+            raiseload=True,
+            backref=False,
+            delete=True,
+            active_history=False,
+        ),
+        dict(
+            detached=True,
+            raiseload=True,
+            backref=False,
+            delete=True,
+            active_history=False,
+        ),
+        dict(
+            detached=False,
+            raiseload=False,
+            backref=False,
+            delete=True,
+            active_history=True,
+        ),
+        dict(
+            detached=True,
+            raiseload=False,
+            backref=False,
+            delete=True,
+            active_history=True,
+        ),
+        dict(
+            detached=False,
+            raiseload=True,
+            backref=False,
+            delete=True,
+            active_history=True,
+        ),
+        dict(
+            detached=True,
+            raiseload=True,
+            backref=False,
+            delete=True,
+            active_history=True,
+        ),
+    )
+    def test_m2o(self, detached, raiseload, backref, active_history, delete):
 
         if delete:
             assert not backref, "delete and backref are mutually exclusive"
@@ -5184,221 +5596,16 @@ class InactiveHistoryNoRaiseTest(_fixtures.FixtureTest):
 
         s.commit()
 
-    def test_replace_m2o(self):
-        self._run_test(
-            detached=False,
-            raiseload=False,
-            backref=False,
-            delete=False,
-            active_history=False,
-        )
+        eq_(s.query(Address).count(), 1)
+        eq_(s.query(User).count(), 1)
 
-    def test_replace_m2o_detached(self):
-        self._run_test(
-            detached=True,
-            raiseload=False,
-            backref=False,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_raiseload(self):
-        self._run_test(
-            detached=False,
-            raiseload=True,
-            backref=False,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_detached_raiseload(self):
-        self._run_test(
-            detached=True,
-            raiseload=True,
-            backref=False,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_backref(self):
-        self._run_test(
-            detached=False,
-            raiseload=False,
-            backref=True,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_detached_backref(self):
-        self._run_test(
-            detached=True,
-            raiseload=False,
-            backref=True,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_raiseload_backref(self):
-        self._run_test(
-            detached=False,
-            raiseload=True,
-            backref=True,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_detached_raiseload_backref(self):
-        self._run_test(
-            detached=True,
-            raiseload=True,
-            backref=True,
-            delete=False,
-            active_history=False,
-        )
-
-    def test_replace_m2o_activehistory(self):
-        self._run_test(
-            detached=False,
-            raiseload=False,
-            backref=False,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_detached_activehistory(self):
-        self._run_test(
-            detached=True,
-            raiseload=False,
-            backref=False,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_raiseload_activehistory(self):
-        self._run_test(
-            detached=False,
-            raiseload=True,
-            backref=False,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_detached_raiseload_activehistory(self):
-        self._run_test(
-            detached=True,
-            raiseload=True,
-            backref=False,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_backref_activehistory(self):
-        self._run_test(
-            detached=False,
-            raiseload=False,
-            backref=True,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_detached_backref_activehistory(self):
-        self._run_test(
-            detached=True,
-            raiseload=False,
-            backref=True,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_raiseload_backref_activehistory(self):
-        self._run_test(
-            detached=False,
-            raiseload=True,
-            backref=True,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_replace_m2o_detached_raiseload_backref_activehistory(self):
-        self._run_test(
-            detached=True,
-            raiseload=True,
-            backref=True,
-            delete=False,
-            active_history=True,
-        )
-
-    def test_delete_m2o(self):
-        self._run_test(
-            detached=False,
-            raiseload=False,
-            backref=False,
-            delete=True,
-            active_history=False,
-        )
-
-    def test_delete_m2o_detached(self):
-        self._run_test(
-            detached=True,
-            raiseload=False,
-            backref=False,
-            delete=True,
-            active_history=False,
-        )
-
-    def test_delete_m2o_raiseload(self):
-        self._run_test(
-            detached=False,
-            raiseload=True,
-            backref=False,
-            delete=True,
-            active_history=False,
-        )
-
-    def test_delete_m2o_detached_raiseload(self):
-        self._run_test(
-            detached=True,
-            raiseload=True,
-            backref=False,
-            delete=True,
-            active_history=False,
-        )
-
-    def test_delete_m2o_activehistory(self):
-        self._run_test(
-            detached=False,
-            raiseload=False,
-            backref=False,
-            delete=True,
-            active_history=True,
-        )
-
-    def test_delete_m2o_detached_activehistory(self):
-        self._run_test(
-            detached=True,
-            raiseload=False,
-            backref=False,
-            delete=True,
-            active_history=True,
-        )
-
-    def test_delete_m2o_raiseload_activehistory(self):
-        self._run_test(
-            detached=False,
-            raiseload=True,
-            backref=False,
-            delete=True,
-            active_history=True,
-        )
-
-    def test_delete_m2o_detached_raiseload_activehistory(self):
-        self._run_test(
-            detached=True,
-            raiseload=True,
-            backref=False,
-            delete=True,
-            active_history=True,
-        )
+        # test for issue #4997
+        # delete of Address should proceed, as User object does not
+        # need to be loaded
+        s.delete(a1)
+        s.commit()
+        eq_(s.query(Address).count(), 0)
+        eq_(s.query(User).count(), 1)
 
 
 class RelationDeprecationTest(fixtures.MappedTest):
@@ -5474,3 +5681,157 @@ class RelationDeprecationTest(fixtures.MappedTest):
         session.query(User).filter(
             User.addresses.any(Address.email_address == "ed@foo.bar")
         ).one()
+
+
+class SecondaryIncludesLocalColsTest(fixtures.MappedTest):
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "a",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("b_ids", String(50)),
+        )
+
+        Table("b", metadata, Column("id", String(10), primary_key=True))
+
+    @classmethod
+    def setup_classes(cls):
+        class A(cls.Comparable):
+            pass
+
+        class B(cls.Comparable):
+            pass
+
+    @classmethod
+    def setup_mappers(cls):
+        A, B = cls.classes("A", "B")
+        a, b = cls.tables("a", "b")
+
+        secondary = (
+            select([a.c.id.label("aid"), b])
+            .select_from(a.join(b, a.c.b_ids.like("%" + b.c.id + "%")))
+            .alias()
+        )
+
+        mapper(
+            A,
+            a,
+            properties=dict(
+                bs=relationship(
+                    B,
+                    secondary=secondary,
+                    primaryjoin=a.c.id == secondary.c.aid,
+                    secondaryjoin=b.c.id == secondary.c.id,
+                )
+            ),
+        )
+        mapper(B, b)
+
+    @classmethod
+    def insert_data(cls, connection):
+        A, B = cls.classes("A", "B")
+
+        s = Session(connection)
+        s.add_all(
+            [
+                A(id=1, b_ids="1"),
+                A(id=2, b_ids="2 3"),
+                B(id="1"),
+                B(id="2"),
+                B(id="3"),
+            ]
+        )
+        s.commit()
+
+    def test_query_join(self):
+        A, B = self.classes("A", "B")
+
+        s = Session()
+
+        with assert_engine(testing.db) as asserter_:
+            rows = s.query(A.id, B.id).join(A.bs).order_by(A.id, B.id).all()
+
+            eq_(rows, [(1, "1"), (2, "2"), (2, "3")])
+
+        asserter_.assert_(
+            CompiledSQL(
+                "SELECT a.id AS a_id, b.id AS b_id FROM a JOIN "
+                "(SELECT a.id AS "
+                "aid, b.id AS id FROM a JOIN b ON a.b_ids LIKE :id_1 || "
+                "b.id || :param_1) AS anon_1 ON a.id = anon_1.aid "
+                "JOIN b ON b.id = anon_1.id ORDER BY a.id, b.id"
+            )
+        )
+
+    def test_eager_join(self):
+        A, B = self.classes("A", "B")
+
+        s = Session()
+
+        with assert_engine(testing.db) as asserter_:
+            a2 = (
+                s.query(A).options(joinedload(A.bs)).filter(A.id == 2).all()[0]
+            )
+
+            eq_({b.id for b in a2.bs}, {"2", "3"})
+
+        asserter_.assert_(
+            CompiledSQL(
+                "SELECT a.id AS a_id, a.b_ids AS a_b_ids, b_1.id AS b_1_id "
+                "FROM a LEFT OUTER JOIN ((SELECT a.id AS aid, b.id AS id "
+                "FROM a JOIN b ON a.b_ids LIKE :id_1 || b.id || :param_1) "
+                "AS anon_1 JOIN b AS b_1 ON b_1.id = anon_1.id) "
+                "ON a.id = anon_1.aid WHERE a.id = :id_2",
+                params=[{"id_1": "%", "param_1": "%", "id_2": 2}],
+            )
+        )
+
+    def test_exists(self):
+        A, B = self.classes("A", "B")
+
+        s = Session()
+
+        with assert_engine(testing.db) as asserter_:
+            eq_(set(id_ for id_, in s.query(A.id).filter(A.bs.any())), {1, 2})
+
+        asserter_.assert_(
+            CompiledSQL(
+                "SELECT a.id AS a_id FROM a WHERE "
+                "EXISTS (SELECT 1 FROM (SELECT a.id AS aid, b.id AS id "
+                "FROM a JOIN b ON a.b_ids LIKE :id_1 || b.id || :param_1) "
+                "AS anon_1, b WHERE a.id = anon_1.aid AND b.id = anon_1.id)",
+                params=[],
+            )
+        )
+
+    def test_eager_selectin(self):
+        A, B = self.classes("A", "B")
+
+        s = Session()
+
+        with assert_engine(testing.db) as asserter_:
+            a2 = (
+                s.query(A)
+                .options(selectinload(A.bs))
+                .filter(A.id == 2)
+                .all()[0]
+            )
+
+            eq_({b.id for b in a2.bs}, {"2", "3"})
+
+        asserter_.assert_(
+            CompiledSQL(
+                "SELECT a.id AS a_id, a.b_ids AS a_b_ids "
+                "FROM a WHERE a.id = :id_1",
+                params=[{"id_1": 2}],
+            ),
+            CompiledSQL(
+                "SELECT a_1.id AS a_1_id, b.id AS b_id FROM a AS a_1 JOIN "
+                "(SELECT a.id AS aid, b.id AS id FROM a JOIN b ON a.b_ids "
+                "LIKE :id_1 || b.id || :param_1) AS anon_1 "
+                "ON a_1.id = anon_1.aid JOIN b ON b.id = anon_1.id "
+                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
+                params=[{"id_1": "%", "param_1": "%", "primary_keys": [2]}],
+            ),
+        )

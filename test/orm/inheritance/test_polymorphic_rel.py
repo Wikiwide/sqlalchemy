@@ -11,6 +11,7 @@ from sqlalchemy.orm import subqueryload
 from sqlalchemy.orm import with_polymorphic
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing.assertsql import CompiledSQL
 from ._poly_fixtures import _Polymorphic
 from ._poly_fixtures import _PolymorphicAliasedJoins
 from ._poly_fixtures import _PolymorphicJoins
@@ -44,8 +45,8 @@ class _PolymorphicTestBase(object):
         )
 
     @classmethod
-    def insert_data(cls):
-        super(_PolymorphicTestBase, cls).insert_data()
+    def insert_data(cls, connection):
+        super(_PolymorphicTestBase, cls).insert_data(connection)
 
         global all_employees, c1_employees, c2_employees
         global c1, c2, e1, e2, e3, b1, m1
@@ -896,7 +897,6 @@ class _PolymorphicTestBase(object):
         ]
 
         def go():
-            # test load People with subqueryload to engineers + machines
             eq_(
                 sess.query(Person)
                 .with_polymorphic("*")
@@ -1346,6 +1346,56 @@ class _PolymorphicTestBase(object):
             .order_by(Person.person_id)
             .filter(Person.type == "engineer")
             .all(),
+            expected,
+        )
+
+    def _join_to_poly_wp_one(self, sess):
+        wp = with_polymorphic(self.classes.Person, "*")
+        return (
+            sess.query(wp.name, self.classes.Company.name)
+            .join(self.classes.Company.employees.of_type(wp))
+            .order_by(wp.person_id)
+        )
+
+    def _join_to_poly_wp_two(self, sess):
+        wp = with_polymorphic(self.classes.Person, "*", aliased=True)
+        return (
+            sess.query(wp.name, self.classes.Company.name)
+            .join(self.classes.Company.employees.of_type(wp))
+            .order_by(wp.person_id)
+        )
+
+    def _join_to_poly_wp_three(self, sess):
+        wp = with_polymorphic(
+            self.classes.Person, "*", aliased=True, flat=True
+        )
+        return (
+            sess.query(wp.name, self.classes.Company.name)
+            .join(self.classes.Company.employees.of_type(wp))
+            .order_by(wp.person_id)
+        )
+
+    @testing.combinations(
+        lambda self, sess: (
+            sess.query(self.classes.Person.name, self.classes.Company.name)
+            .join(self.classes.Company.employees)
+            .order_by(self.classes.Person.person_id)
+        ),
+        _join_to_poly_wp_one,
+        _join_to_poly_wp_two,
+        _join_to_poly_wp_three,
+    )
+    def test_mixed_entities_join_to_poly(self, q):
+        sess = create_session()
+        expected = [
+            ("dilbert", "MegaCorp, Inc."),
+            ("wally", "MegaCorp, Inc."),
+            ("pointy haired boss", "MegaCorp, Inc."),
+            ("dogbert", "MegaCorp, Inc."),
+            ("vlad", "Elbonia, Inc."),
+        ]
+        eq_(
+            q(self, sess).all(),
             expected,
         )
 
@@ -1861,7 +1911,83 @@ class PolymorphicPolymorphicTest(
 
 
 class PolymorphicUnionsTest(_PolymorphicTestBase, _PolymorphicUnions):
-    pass
+    def test_subqueryload_on_subclass_uses_path_correctly(self):
+        sess = create_session()
+        expected = [
+            Engineer(
+                name="dilbert",
+                engineer_name="dilbert",
+                primary_language="java",
+                status="regular engineer",
+                machines=[
+                    Machine(name="IBM ThinkPad"),
+                    Machine(name="IPhone"),
+                ],
+            )
+        ]
+
+        with self.sql_execution_asserter(testing.db) as asserter:
+            wp = with_polymorphic(Person, "*")
+            eq_(
+                sess.query(wp)
+                .options(subqueryload(wp.Engineer.machines))
+                .filter(wp.name == "dilbert")
+                .all(),
+                expected,
+            )
+
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT pjoin.person_id AS pjoin_person_id, "
+                "pjoin.company_id AS pjoin_company_id, "
+                "pjoin.name AS pjoin_name, pjoin.type AS pjoin_type, "
+                "pjoin.status AS pjoin_status, "
+                "pjoin.engineer_name AS pjoin_engineer_name, "
+                "pjoin.primary_language AS pjoin_primary_language, "
+                "pjoin.manager_name AS pjoin_manager_name "
+                "FROM (SELECT engineers.person_id AS person_id, "
+                "people.company_id AS company_id, people.name AS name, "
+                "people.type AS type, engineers.status AS status, "
+                "engineers.engineer_name AS engineer_name, "
+                "engineers.primary_language AS primary_language, "
+                "CAST(NULL AS VARCHAR(50)) AS manager_name "
+                "FROM people JOIN engineers ON people.person_id = "
+                "engineers.person_id UNION ALL SELECT managers.person_id "
+                "AS person_id, people.company_id AS company_id, people.name "
+                "AS name, people.type AS type, managers.status AS status, "
+                "CAST(NULL AS VARCHAR(50)) AS engineer_name, "
+                "CAST(NULL AS VARCHAR(50)) AS primary_language, "
+                "managers.manager_name AS manager_name FROM people "
+                "JOIN managers ON people.person_id = managers.person_id) "
+                "AS pjoin WHERE pjoin.name = :name_1",
+                params=[{"name_1": "dilbert"}],
+            ),
+            CompiledSQL(
+                "SELECT machines.machine_id AS machines_machine_id, "
+                "machines.name AS machines_name, machines.engineer_id "
+                "AS machines_engineer_id, anon_1.pjoin_person_id AS "
+                "anon_1_pjoin_person_id FROM "
+                "(SELECT pjoin.person_id AS pjoin_person_id FROM "
+                "(SELECT engineers.person_id AS person_id, people.company_id "
+                "AS company_id, people.name AS name, "
+                "people.type AS type, engineers.status AS status, "
+                "engineers.engineer_name AS engineer_name, "
+                "engineers.primary_language AS primary_language, "
+                "CAST(NULL AS VARCHAR(50)) AS manager_name FROM people "
+                "JOIN engineers ON people.person_id = engineers.person_id "
+                "UNION ALL SELECT managers.person_id AS person_id, "
+                "people.company_id AS company_id, people.name AS name, "
+                "people.type AS type, managers.status AS status, "
+                "CAST(NULL AS VARCHAR(50)) AS engineer_name, "
+                "CAST(NULL AS VARCHAR(50)) AS primary_language, "
+                "managers.manager_name AS manager_name FROM people "
+                "JOIN managers ON people.person_id = managers.person_id) "
+                "AS pjoin WHERE pjoin.name = :name_1) AS anon_1 JOIN "
+                "machines ON anon_1.pjoin_person_id = machines.engineer_id "
+                "ORDER BY machines.machine_id",
+                params=[{"name_1": "dilbert"}],
+            ),
+        )
 
 
 class PolymorphicAliasedJoinsTest(

@@ -1,6 +1,7 @@
 import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy import ForeignKey
+from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import Sequence
 from sqlalchemy import String
@@ -390,6 +391,29 @@ class SessionStateTest(_fixtures.FixtureTest):
 
         is_true(sess.autoflush)
 
+    def test_autoflush_exception_addition(self):
+        User, users = self.classes.User, self.tables.users
+        Address, addresses = self.classes.Address, self.tables.addresses
+        mapper(User, users, properties={"addresses": relationship(Address)})
+        mapper(Address, addresses)
+
+        s = Session(testing.db)
+
+        u1 = User(name="first")
+
+        s.add(u1)
+        s.commit()
+
+        u1.addresses.append(Address(email=None))
+
+        # will raise for null email address
+        assert_raises_message(
+            sa.exc.DBAPIError,
+            ".*raised as a result of Query-invoked autoflush; consider using "
+            "a session.no_autoflush block.*",
+            s.query(User).first,
+        )
+
     def test_deleted_flag(self):
         users, User = self.tables.users, self.classes.User
 
@@ -650,6 +674,53 @@ class SessionStateTest(_fixtures.FixtureTest):
                 s.identity_map.add,
                 sa.orm.attributes.instance_state(u2),
             )
+
+    def test_internal_identity_conflict_warning_weak(self):
+        self._test_internal_identity_conflict_warning(True)
+
+    def test_internal_identity_conflict_warning_strong(self):
+        self._test_internal_identity_conflict_warning(False)
+
+    def _test_internal_identity_conflict_warning(self, weak_identity_map):
+        # test for issue #4890
+        # see also test_naturalpks::ReversePKsTest::test_reverse
+        users, User = self.tables.users, self.classes.User
+        addresses, Address = self.tables.addresses, self.classes.Address
+
+        mapper(
+            User,
+            users,
+            properties={"addresses": relationship(Address, backref="user")},
+        )
+        mapper(Address, addresses)
+
+        with testing.expect_deprecated():
+            session = Session(weak_identity_map=weak_identity_map)
+
+        @event.listens_for(session, "after_flush")
+        def load_collections(session, flush_context):
+            for target in set(session.new).union(session.dirty):
+                if isinstance(target, User):
+                    target.addresses
+
+        u1 = User(name="u1")
+        a1 = Address(email_address="e1", user=u1)
+        session.add_all([u1, a1])
+        session.flush()
+
+        session.expire_all()
+
+        # create new Address via backref, so that u1.addresses remains
+        # expired and a2 is in pending mutations
+        a2 = Address(email_address="e2", user=u1)
+        assert "addresses" not in inspect(u1).dict
+        assert a2 in inspect(u1)._pending_mutations["addresses"].added_items
+
+        with assertions.expect_warnings(
+            r"Identity map already had an identity "
+            r"for \(.*Address.*\), replacing"
+        ):
+            session.flush()
 
     def test_pickled_update(self):
         users, User = self.tables.users, pickleable.User
@@ -1655,11 +1726,11 @@ class SessionInterface(fixtures.TestBase):
     def _public_session_methods(self):
         Session = sa.orm.session.Session
 
-        blacklist = set(("begin", "query"))
+        blocklist = set(("begin", "query"))
 
         ok = set()
         for meth in Session.public_methods:
-            if meth in blacklist:
+            if meth in blocklist:
                 continue
             spec = inspect_getfullargspec(getattr(Session, meth))
             if len(spec[0]) > 1 or spec[1]:

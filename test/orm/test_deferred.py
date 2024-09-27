@@ -22,6 +22,7 @@ from sqlalchemy.orm import undefer
 from sqlalchemy.orm import undefer_group
 from sqlalchemy.orm import with_expression
 from sqlalchemy.orm import with_polymorphic
+from sqlalchemy.sql import literal
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
@@ -267,8 +268,8 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         self.sql_count_(0, go)
 
     def test_preserve_changes(self):
-        """A deferred load operation doesn't revert modifications on attributes
-        """
+        """A deferred load operation doesn't revert modifications on
+        attributes"""
 
         orders, Order = self.tables.orders, self.classes.Order
 
@@ -661,7 +662,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
                     "FROM (SELECT users.id AS "
                     "users_id FROM users WHERE users.id = :id_1) AS anon_1 "
                     "JOIN orders ON anon_1.users_id = orders.user_id ORDER BY "
-                    "anon_1.users_id, orders.id",
+                    "orders.id",
                     [{"id_1": 7}],
                 ),
             ],
@@ -820,7 +821,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
     def test_locates_col(self):
         """changed in 1.0 - we don't search for deferred cols in the result
-        now.  """
+        now."""
 
         orders, Order = self.tables.orders, self.classes.Order
 
@@ -923,7 +924,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         eq_(item.description, "item 4")
 
     def test_path_entity(self):
-        """test the legacy *addl_attrs argument."""
+        r"""test the legacy \*addl_attrs argument."""
 
         User = self.classes.User
         Order = self.classes.Order
@@ -1188,10 +1189,10 @@ class SelfReferentialMultiPathTest(testing.fixtures.DeclarativeMappedTest):
             name = sa.Column(sa.String(10))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Node = cls.classes.Node
 
-        session = Session()
+        session = Session(connection)
         session.add_all(
             [
                 Node(id=1, name="name"),
@@ -1650,10 +1651,17 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
 
             b_expr = query_expression()
 
+        class C(fixtures.ComparableEntity, Base):
+            __tablename__ = "c"
+            id = Column(Integer, primary_key=True)
+            x = Column(Integer)
+
+            c_expr = query_expression(literal(1))
+
     @classmethod
-    def insert_data(cls):
-        A, B = cls.classes("A", "B")
-        s = Session()
+    def insert_data(cls, connection):
+        A, B, C = cls.classes("A", "B", "C")
+        s = Session(connection)
 
         s.add_all(
             [
@@ -1661,6 +1669,8 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
                 A(id=2, x=2, y=3),
                 A(id=3, x=5, y=10, bs=[B(id=3, p=5, q=0)]),
                 A(id=4, x=2, y=10, bs=[B(id=4, p=19, q=8), B(id=5, p=5, q=5)]),
+                C(id=1, x=1),
+                C(id=2, x=2),
             ]
         )
 
@@ -1678,6 +1688,25 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
         )
 
         eq_(a1.all(), [A(my_expr=5), A(my_expr=15), A(my_expr=12)])
+
+    def test_expr_default_value(self):
+        A = self.classes.A
+        C = self.classes.C
+        s = Session()
+
+        a1 = s.query(A).order_by(A.id).filter(A.x > 1)
+        eq_(a1.all(), [A(my_expr=None), A(my_expr=None), A(my_expr=None)])
+
+        c1 = s.query(C).order_by(C.id)
+        eq_(c1.all(), [C(c_expr=1), C(c_expr=1)])
+
+        c2 = (
+            s.query(C)
+            .options(with_expression(C.c_expr, C.x * 2))
+            .filter(C.x > 1)
+            .order_by(C.id)
+        )
+        eq_(c2.all(), [C(c_expr=4)])
 
     def test_reuse_expr(self):
         A = self.classes.A
@@ -1712,6 +1741,38 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
         eq_(
             q.all(), [A(bs=[B(b_expr=25)]), A(bs=[B(b_expr=38), B(b_expr=10)])]
         )
+
+    def test_no_refresh_unless_populate_existing(self):
+        A = self.classes.A
+
+        s = Session()
+        a1 = s.query(A).first()
+
+        def go():
+            eq_(a1.my_expr, None)
+
+        self.assert_sql_count(testing.db, go, 0)
+
+        a1 = s.query(A).options(with_expression(A.my_expr, A.x + A.y)).first()
+
+        eq_(a1.my_expr, None)
+
+        a1 = (
+            s.query(A)
+            .populate_existing()
+            .options(with_expression(A.my_expr, A.x + A.y))
+            .first()
+        )
+
+        eq_(a1.my_expr, 3)
+
+        a1 = s.query(A).first()
+
+        eq_(a1.my_expr, 3)
+
+        s.expire(a1)
+
+        eq_(a1.my_expr, None)
 
     def test_no_sql_not_set_up(self):
         A = self.classes.A

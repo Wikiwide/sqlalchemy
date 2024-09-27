@@ -22,6 +22,7 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -479,6 +480,30 @@ class _MutableListTestBase(_MutableListTestFixture):
         sess.commit()
 
         eq_(f1.data, [1, 2, 3])
+
+    def test_sort_w_key(self):
+        sess = Session()
+
+        f1 = Foo(data=[1, 3, 2])
+        sess.add(f1)
+        sess.commit()
+
+        f1.data.sort(key=lambda elem: -1 * elem)
+        sess.commit()
+
+        eq_(f1.data, [3, 2, 1])
+
+    def test_sort_w_reverse_kwarg(self):
+        sess = Session()
+
+        f1 = Foo(data=[1, 3, 2])
+        sess.add(f1)
+        sess.commit()
+
+        f1.data.sort(reverse=True)
+        sess.commit()
+
+        eq_(f1.data, [3, 2, 1])
 
     def test_reverse(self):
         sess = Session()
@@ -1363,6 +1388,39 @@ class MutableCompositesTest(_CompositeTestBase, fixtures.MappedTest):
         sess.commit()
 
         eq_(f1.data.x, 5)
+
+    def test_dont_reset_on_attr_refresh(self):
+        sess = Session()
+        f1 = Foo(data=Point(3, 4), unrelated_data="unrelated")
+        sess.add(f1)
+        sess.flush()
+
+        f1.data.x = 5
+
+        # issue 6001, this would reload a new Point() that would be missed
+        # by the mutable composite, and tracking would be lost
+        sess.refresh(f1, ["unrelated_data"])
+
+        is_(list(f1.data._parents.keys())[0], f1)
+
+        f1.data.y = 9
+
+        sess.commit()
+
+        eq_(f1.data.x, 5)
+        eq_(f1.data.y, 9)
+
+        f1.data.x = 12
+
+        sess.refresh(f1, ["unrelated_data", "y"])
+
+        is_(list(f1.data._parents.keys())[0], f1)
+
+        f1.data.y = 15
+        sess.commit()
+
+        eq_(f1.data.x, 12)
+        eq_(f1.data.y, 15)
 
 
 class MutableCompositeCallableTest(_CompositeTestBase, fixtures.MappedTest):

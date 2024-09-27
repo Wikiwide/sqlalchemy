@@ -1,6 +1,7 @@
 import unicodedata
 
 import sqlalchemy as sa
+from sqlalchemy import Computed
 from sqlalchemy import DefaultClause
 from sqlalchemy import FetchedValue
 from sqlalchemy import ForeignKey
@@ -24,9 +25,12 @@ from sqlalchemy.testing import eq_regex
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
+from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_instance_of
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
-from sqlalchemy.testing import not_in_
+from sqlalchemy.testing import not_in
 from sqlalchemy.testing import skip
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -97,7 +101,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         self.assert_tables_equal(addresses, reflected_addresses)
 
     @testing.provide_metadata
-    def test_autoload_with_imply_autoload(self,):
+    def test_autoload_with_imply_autoload(
+        self,
+    ):
         meta = self.metadata
         t = Table(
             "t",
@@ -164,7 +170,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         meta2 = MetaData()
         t1 = Table("t1", meta2, resolve_fks=False, autoload_with=testing.db)
         in_("t1", meta2.tables)
-        not_in_("t2", meta2.tables)
+        not_in("t2", meta2.tables)
 
         assert_raises(
             sa.exc.NoReferencedTableError,
@@ -204,7 +210,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             autoload_with=testing.db,
             extend_existing=True,
         )
-        not_in_("t2", meta2.tables)
+        not_in("t2", meta2.tables)
 
         assert_raises(
             sa.exc.NoReferencedTableError,
@@ -236,7 +242,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         meta2 = MetaData()
         meta2.reflect(testing.db, resolve_fks=False, only=["t1"])
         in_("t1", meta2.tables)
-        not_in_("t2", meta2.tables)
+        not_in("t2", meta2.tables)
 
         t1 = meta2.tables["t1"]
 
@@ -593,13 +599,10 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         testing.db.dialect.ischema_names = {}
         try:
             m2 = MetaData(testing.db)
-            assert_raises(sa.exc.SAWarning, Table, "test", m2, autoload=True)
 
-            @testing.emits_warning("Did not recognize type")
-            def warns():
-                m3 = MetaData(testing.db)
-                t3 = Table("test", m3, autoload=True)
-                assert t3.c.foo.type.__class__ == sa.types.NullType
+            with testing.expect_warnings("Did not recognize type"):
+                t3 = Table("test", m2, autoload_with=testing.db)
+                is_(t3.c.foo.type.__class__, sa.types.NullType)
 
         finally:
             testing.db.dialect.ischema_names = ischema_names
@@ -879,7 +882,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
     def test_override_existing_fk(self):
         """test that you can override columns and specify new foreign
         keys to other reflected tables, on columns which *do* already
-        have that foreign key, and that the FK is not duped. """
+        have that foreign key, and that the FK is not duped."""
 
         meta = self.metadata
         Table(
@@ -1796,8 +1799,6 @@ class SchemaTest(fixtures.TestBase):
             )
 
     @testing.requires.schemas
-    @testing.fails_on("sqlite", "FIXME: unknown")
-    @testing.fails_on("sybase", "FIXME: unknown")
     def test_explicit_default_schema(self):
         engine = testing.db
         engine.connect().close()
@@ -2267,3 +2268,42 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TestBase):
             eq_(str(table.c.x.server_default.arg), "1")
 
         self._do_test("x", {"default": my_default}, assert_text_of_one)
+
+
+class ComputedColumnTest(fixtures.ComputedReflectionFixtureTest):
+    def check_table_column(self, table, name, text, persisted):
+        is_true(name in table.columns)
+        col = table.columns[name]
+        is_not(col.computed, None)
+        is_instance_of(col.computed, Computed)
+
+        eq_(self.normalize(str(col.computed.sqltext)), text)
+        if testing.requires.computed_columns_reflect_persisted.enabled:
+            eq_(col.computed.persisted, persisted)
+        else:
+            is_(col.computed.persisted, None)
+
+    def test_table_reflection(self):
+        meta = MetaData()
+        table = Table("computed_column_table", meta, autoload_with=config.db)
+
+        self.check_table_column(
+            table,
+            "computed_no_flag",
+            "normal+42",
+            testing.requires.computed_columns_default_persisted.enabled,
+        )
+        if testing.requires.computed_columns_virtual.enabled:
+            self.check_table_column(
+                table,
+                "computed_virtual",
+                "normal+2",
+                False,
+            )
+        if testing.requires.computed_columns_stored.enabled:
+            self.check_table_column(
+                table,
+                "computed_stored",
+                "normal-42",
+                True,
+            )

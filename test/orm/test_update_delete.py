@@ -22,6 +22,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
+from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -56,16 +57,17 @@ class UpdateDeleteTest(fixtures.MappedTest):
             pass
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         users = cls.tables.users
 
-        users.insert().execute(
+        connection.execute(
+            users.insert(),
             [
                 dict(id=1, name="john", age_int=25),
                 dict(id=2, name="jack", age_int=47),
                 dict(id=3, name="jill", age_int=29),
                 dict(id=4, name="jane", age_int=37),
-            ]
+            ],
         )
 
     @classmethod
@@ -227,6 +229,184 @@ class UpdateDeleteTest(fixtures.MappedTest):
             {Foo.ufoo: "moonbeam"}, synchronize_session="evaluate"
         )
         eq_(jill.ufoo, "moonbeam")
+
+    @testing.combinations(
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    )
+    def test_evaluate_dont_refresh_expired_objects(
+        self, expire_jane_age, add_filter_criteria
+    ):
+        User = self.classes.User
+
+        sess = Session()
+
+        john, jack, jill, jane = sess.query(User).order_by(User.id).all()
+
+        sess.expire(john)
+        sess.expire(jill)
+
+        if expire_jane_age:
+            sess.expire(jane, ["name", "age"])
+        else:
+            sess.expire(jane, ["name"])
+
+        with self.sql_execution_asserter() as asserter:
+            # using 1.x style for easier backport
+            if add_filter_criteria:
+                sess.query(User).filter(User.name != None).update(
+                    {"age": User.age + 10}, synchronize_session="evaluate"
+                )
+            else:
+                sess.query(User).update(
+                    {"age": User.age + 10}, synchronize_session="evaluate"
+                )
+
+        if add_filter_criteria:
+            if expire_jane_age:
+                asserter.assert_(
+                    # it has to unexpire jane.name, because jane is not fully
+                    # expired and the critiera needs to look at this particular
+                    # key
+                    CompiledSQL(
+                        "SELECT users.age_int AS users_age_int, "
+                        "users.name AS users_name FROM users "
+                        "WHERE users.id = :param_1",
+                        [{"param_1": 4}],
+                    ),
+                    CompiledSQL(
+                        "UPDATE users "
+                        "SET age_int=(users.age_int + :age_int_1) "
+                        "WHERE users.name IS NOT NULL",
+                        [{"age_int_1": 10}],
+                    ),
+                )
+            else:
+                asserter.assert_(
+                    # it has to unexpire jane.name, because jane is not fully
+                    # expired and the critiera needs to look at this particular
+                    # key
+                    CompiledSQL(
+                        "SELECT users.name AS users_name FROM users "
+                        "WHERE users.id = :param_1",
+                        [{"param_1": 4}],
+                    ),
+                    CompiledSQL(
+                        "UPDATE users SET "
+                        "age_int=(users.age_int + :age_int_1) "
+                        "WHERE users.name IS NOT NULL",
+                        [{"age_int_1": 10}],
+                    ),
+                )
+        else:
+            asserter.assert_(
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int + :age_int_1)",
+                    [{"age_int_1": 10}],
+                ),
+            )
+
+        with self.sql_execution_asserter() as asserter:
+            eq_(john.age, 35)  # needs refresh
+            eq_(jack.age, 57)  # no SQL needed
+            eq_(jill.age, 39)  # needs refresh
+            eq_(jane.age, 47)  # needs refresh
+
+        to_assert = [
+            # refresh john
+            CompiledSQL(
+                "SELECT users.age_int AS users_age_int, "
+                "users.id AS users_id, users.name AS users_name FROM users "
+                "WHERE users.id = :param_1",
+                [{"param_1": 1}],
+            ),
+            # refresh jill
+            CompiledSQL(
+                "SELECT users.age_int AS users_age_int, "
+                "users.id AS users_id, users.name AS users_name FROM users "
+                "WHERE users.id = :param_1",
+                [{"param_1": 3}],
+            ),
+        ]
+
+        if expire_jane_age and not add_filter_criteria:
+            to_assert.append(
+                # refresh jane
+                CompiledSQL(
+                    "SELECT users.age_int AS users_age_int, "
+                    "users.name AS users_name FROM users "
+                    "WHERE users.id = :param_1",
+                    [{"param_1": 4}],
+                )
+            )
+        asserter.assert_(*to_assert)
+
+    def test_fetch_dont_refresh_expired_objects(self):
+        User = self.classes.User
+
+        sess = Session()
+
+        john, jack, jill, jane = sess.query(User).order_by(User.id).all()
+
+        sess.expire(john)
+        sess.expire(jill)
+        sess.expire(jane, ["name"])
+
+        with self.sql_execution_asserter() as asserter:
+            # using 1.x style for easier backport
+            sess.query(User).filter(User.name != None).update(
+                {"age": User.age + 10}, synchronize_session="fetch"
+            )
+
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT users.id AS users_id FROM users "
+                "WHERE users.name IS NOT NULL"
+            ),
+            CompiledSQL(
+                "UPDATE users SET age_int=(users.age_int + :age_int_1) "
+                "WHERE users.name IS NOT NULL",
+                [{"age_int_1": 10}],
+            ),
+        )
+
+        with self.sql_execution_asserter() as asserter:
+            eq_(john.age, 35)  # needs refresh
+            eq_(jack.age, 57)  # refreshes in 1.3
+            eq_(jill.age, 39)  # needs refresh
+            eq_(jane.age, 47)  # refreshes in 1.3
+
+        asserter.assert_(
+            # refresh john
+            CompiledSQL(
+                "SELECT users.age_int AS users_age_int, "
+                "users.id AS users_id, users.name AS users_name FROM users "
+                "WHERE users.id = :param_1",
+                [{"param_1": 1}],
+            ),
+            # refresh jack.age in 1.3 only
+            CompiledSQL(
+                "SELECT users.age_int AS users_age_int FROM users "
+                "WHERE users.id = :param_1",
+                [{"param_1": 2}],
+            ),
+            # refresh jill
+            CompiledSQL(
+                "SELECT users.age_int AS users_age_int, "
+                "users.id AS users_id, users.name AS users_name FROM users "
+                "WHERE users.id = :param_1",
+                [{"param_1": 3}],
+            ),
+            # refresh jane, seems to be a full refresh in 1.3.
+            CompiledSQL(
+                "SELECT users.age_int AS users_age_int, "
+                "users.name AS users_name FROM users "
+                "WHERE users.id = :param_1",
+                [{"param_1": 4}],
+            ),
+        )
 
     def test_delete(self):
         User = self.classes.User
@@ -743,26 +923,28 @@ class UpdateDeleteIgnoresLoadersTest(fixtures.MappedTest):
             pass
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         users = cls.tables.users
 
-        users.insert().execute(
+        connection.execute(
+            users.insert(),
             [
                 dict(id=1, name="john", age=25),
                 dict(id=2, name="jack", age=47),
                 dict(id=3, name="jill", age=29),
                 dict(id=4, name="jane", age=37),
-            ]
+            ],
         )
 
         documents = cls.tables.documents
 
-        documents.insert().execute(
+        connection.execute(
+            documents.insert(),
             [
                 dict(id=1, user_id=1, title="foo"),
                 dict(id=2, user_id=1, title="bar"),
                 dict(id=3, user_id=2, title="baz"),
-            ]
+            ],
         )
 
     @classmethod
@@ -862,16 +1044,17 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
             pass
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         users = cls.tables.users
 
-        users.insert().execute(
-            [dict(id=1), dict(id=2), dict(id=3), dict(id=4)]
+        connection.execute(
+            users.insert(), [dict(id=1), dict(id=2), dict(id=3), dict(id=4)]
         )
 
         documents = cls.tables.documents
 
-        documents.insert().execute(
+        connection.execute(
+            documents.insert(),
             [
                 dict(id=1, user_id=1, title="foo"),
                 dict(id=2, user_id=1, title="bar"),
@@ -879,7 +1062,7 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
                 dict(id=4, user_id=2, title="hoho"),
                 dict(id=5, user_id=3, title="lala"),
                 dict(id=6, user_id=3, title="bleh"),
-            ]
+            ],
         )
 
     @classmethod
@@ -1140,13 +1323,13 @@ class InheritTest(fixtures.DeclarativeMappedTest):
             manager_name = Column(String(50))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Engineer, Person, Manager = (
             cls.classes.Engineer,
             cls.classes.Person,
             cls.classes.Manager,
         )
-        s = Session(testing.db)
+        s = Session(connection)
         s.add_all(
             [
                 Engineer(name="e1", engineer_name="e1"),

@@ -82,11 +82,11 @@ class ResultSetTest(fixtures.TestBase, AssertsExecutionResults):
     def teardown(self):
         metadata.drop_all()
 
-    @profiling.function_call_count()
+    @profiling.function_call_count(variance=0.15)
     def test_string(self):
         [tuple(row) for row in t.select().execute().fetchall()]
 
-    @profiling.function_call_count()
+    @profiling.function_call_count(variance=0.15)
     def test_unicode(self):
         [tuple(row) for row in t2.select().execute().fetchall()]
 
@@ -110,7 +110,7 @@ class ResultSetTest(fixtures.TestBase, AssertsExecutionResults):
             "some other column", Integer
         )
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(variance=0.10)
         def go():
             c1 in row
 

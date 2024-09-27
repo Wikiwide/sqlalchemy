@@ -3,7 +3,7 @@
 Configuring a Version Counter
 =============================
 
-The :class:`.Mapper` supports management of a :term:`version id column`, which
+The :class:`_orm.Mapper` supports management of a :term:`version id column`, which
 is a single table column that increments or otherwise updates its value
 each time an ``UPDATE`` to the mapped table occurs.  This value is checked each
 time the ORM emits an ``UPDATE`` or ``DELETE`` against the row to ensure that
@@ -15,7 +15,7 @@ the value held in memory matches the database value.
     record of an object, the feature only applies to the :meth:`.Session.flush`
     process, where the ORM flushes individual in-memory rows to the database.
     It does **not** take effect when performing
-    a multirow UPDATE or DELETE using :meth:`.Query.update` or :meth:`.Query.delete`
+    a multirow UPDATE or DELETE using :meth:`_query.Query.update` or :meth:`_query.Query.delete`
     methods, as these methods only emit an UPDATE or DELETE statement but otherwise
     do not have direct access to the contents of those rows being affected.
 
@@ -153,7 +153,7 @@ class as follows::
 
         id = Column(Integer, primary_key=True)
         name = Column(String(50), nullable=False)
-        xmin = Column("xmin", Integer, system=True, server_default=FetchedValue())
+        xmin = Column("xmin", String, system=True, server_default=FetchedValue())
 
         __mapper_args__ = {
             'version_id_col': xmin,
@@ -167,7 +167,9 @@ automatically providing the new value of the version id counter.
 
     In the above scenario, as ``xmin`` is a system column provided by PostgreSQL,
     we use the ``system=True`` argument to mark it as a system-provided
-    column, omitted from the ``CREATE TABLE`` statement.
+    column, omitted from the ``CREATE TABLE`` statement.   The datatype of this
+    column is an internal PostgreSQL type called ``xid`` which acts mostly
+    like a string, so we use the :class:`_types.String` datatype.
 
 
 The ORM typically does not actively fetch the values of database-generated

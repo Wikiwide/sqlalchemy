@@ -4,7 +4,7 @@
 Engine Configuration
 ====================
 
-The :class:`.Engine` is the starting point for any SQLAlchemy application. It's
+The :class:`_engine.Engine` is the starting point for any SQLAlchemy application. It's
 "home base" for the actual database and its :term:`DBAPI`, delivered to the SQLAlchemy
 application through a connection pool and a :class:`.Dialect`, which describes how
 to talk to a specific kind of database/DBAPI combination.
@@ -13,30 +13,30 @@ The general structure can be illustrated as follows:
 
 .. image:: sqla_engine_arch.png
 
-Where above, an :class:`.Engine` references both a
-:class:`.Dialect` and a :class:`.Pool`,
+Where above, an :class:`_engine.Engine` references both a
+:class:`.Dialect` and a :class:`_pool.Pool`,
 which together interpret the DBAPI's module functions as well as the behavior
 of the database.
 
 Creating an engine is just a matter of issuing a single call,
-:func:`.create_engine()`::
+:func:`_sa.create_engine()`::
 
     from sqlalchemy import create_engine
     engine = create_engine('postgresql://scott:tiger@localhost:5432/mydatabase')
 
 The above engine creates a :class:`.Dialect` object tailored towards
-PostgreSQL, as well as a :class:`.Pool` object which will establish a DBAPI
+PostgreSQL, as well as a :class:`_pool.Pool` object which will establish a DBAPI
 connection at ``localhost:5432`` when a connection request is first received.
-Note that the :class:`.Engine` and its underlying :class:`.Pool` do **not**
-establish the first actual DBAPI connection until the :meth:`.Engine.connect`
+Note that the :class:`_engine.Engine` and its underlying :class:`_pool.Pool` do **not**
+establish the first actual DBAPI connection until the :meth:`_engine.Engine.connect`
 method is called, or an operation which is dependent on this method such as
-:meth:`.Engine.execute` is invoked. In this way, :class:`.Engine` and
-:class:`.Pool` can be said to have a *lazy initialization* behavior.
+:meth:`_engine.Engine.execute` is invoked. In this way, :class:`_engine.Engine` and
+:class:`_pool.Pool` can be said to have a *lazy initialization* behavior.
 
-The :class:`.Engine`, once created, can either be used directly to interact with the database,
+The :class:`_engine.Engine`, once created, can either be used directly to interact with the database,
 or can be passed to a :class:`.Session` object to work with the ORM.   This section
-covers the details of configuring an :class:`.Engine`.   The next section, :ref:`connections_toplevel`,
-will detail the usage API of the :class:`.Engine` and similar, typically for non-ORM
+covers the details of configuring an :class:`_engine.Engine`.   The next section, :ref:`connections_toplevel`,
+will detail the usage API of the :class:`_engine.Engine` and similar, typically for non-ORM
 applications.
 
 .. _supported_dbapis:
@@ -55,7 +55,7 @@ See the section :ref:`dialect_toplevel` for information on the various backends 
 Database Urls
 =============
 
-The :func:`.create_engine` function produces an :class:`.Engine` object based
+The :func:`_sa.create_engine` function produces an :class:`_engine.Engine` object based
 on a URL.  These URLs follow `RFC-1738
 <http://rfc.net/rfc1738.html>`_, and usually can include username, password,
 hostname, database name as well as optional keyword arguments for additional configuration.
@@ -71,13 +71,17 @@ the database using all lowercase letters. If not specified, a "default" DBAPI
 will be imported if available - this default is typically the most widely
 known driver available for that backend.
 
-As the URL is like any other URL, special characters such as those that
-may be used in the password need to be URL encoded.   Below is an example
-of a URL that includes the password ``"kx%jj5/g"``::
+As the URL is like any other URL, **special characters such as those that may
+be used in the password need to be URL encoded to be parsed correctly.**. Below
+is an example of a URL that includes the password ``"kx%jj5/g"``, where the
+percent sign and slash characters are represented as ``%25`` and ``%2F``,
+respectively::
 
   postgresql+pg8000://dbuser:kx%25jj5%2Fg@pghost10/appdb
 
-The encoding for the above password can be generated using ``urllib``::
+
+The encoding for the above password can be generated using
+`urllib.parse <https://docs.python.org/3/library/urllib.parse.html>`_::
 
   >>> import urllib.parse
   >>> urllib.parse.quote_plus("kx%jj5/g")
@@ -201,15 +205,15 @@ Engine Creation API
 Pooling
 =======
 
-The :class:`.Engine` will ask the connection pool for a
+The :class:`_engine.Engine` will ask the connection pool for a
 connection when the ``connect()`` or ``execute()`` methods are called. The
 default connection pool, :class:`~.QueuePool`, will open connections to the
 database on an as-needed basis. As concurrent statements are executed,
 :class:`.QueuePool` will grow its pool of connections to a
 default size of five, and will allow a default "overflow" of ten. Since the
-:class:`.Engine` is essentially "home base" for the
+:class:`_engine.Engine` is essentially "home base" for the
 connection pool, it follows that you should keep a single
-:class:`.Engine` per database established within an
+:class:`_engine.Engine` per database established within an
 application, rather than creating a new one for each connection.
 
 .. note::
@@ -222,37 +226,156 @@ For more information on connection pooling, see :ref:`pooling_toplevel`.
 
 .. _custom_dbapi_args:
 
-Custom DBAPI connect() arguments
-================================
+Custom DBAPI connect() arguments / on-connect routines
+=======================================================
 
-Custom arguments used when issuing the ``connect()`` call to the underlying
-DBAPI may be issued in three distinct ways. String-based arguments can be
-passed directly from the URL string as query arguments:
+For cases where special connection methods are needed, in the vast majority
+of cases, it is most appropriate to use one of several hooks at the
+:func:`_sa.create_engine` level in order to customize this process. These
+are described in the following sub-sections.
 
-.. sourcecode:: python+sql
+Special Keyword Arguments Passed to dbapi.connect()
+---------------------------------------------------
 
-    db = create_engine('postgresql://scott:tiger@localhost/test?argument1=foo&argument2=bar')
+All Python DBAPIs accept additional arguments beyond the basics of connecting.
+Common parameters include those to specify character set encodings and timeout
+values; more complex data includes special DBAPI constants and objects and SSL
+sub-parameters. There are two rudimentary means of passing these arguments
+without complexity.
 
-If SQLAlchemy's database connector is aware of a particular query argument, it
-may convert its type from string to its proper type.
+Add Parameters to the URL Query string
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-:func:`~sqlalchemy.create_engine` also takes an argument ``connect_args`` which is an additional dictionary that will be passed to ``connect()``.  This can be used when arguments of a type other than string are required, and SQLAlchemy's database connector has no type conversion logic present for that parameter:
+Simple string values, as well as some numeric values and boolean flags, may be
+often specified in the query string of the URL directly. A common example of
+this is DBAPIs that accept an argument ``encoding`` for character encodings,
+such as most MySQL DBAPIs::
 
-.. sourcecode:: python+sql
+    engine = create_engine(
+        "mysql+pymysql://user:pass@host/test?charset=utf8mb4"
+    )
 
-    db = create_engine('postgresql://scott:tiger@localhost/test', connect_args = {'argument1':17, 'argument2':'bar'})
+The advantage of using the query string is that additional DBAPI options may be
+specified in configuration files in a manner that's portable to the DBAPI
+specified in the URL. The specific parameters passed through at this level vary
+by SQLAlchemy dialect. Some dialects pass all arguments through as strings,
+while others will parse for specific datatypes and move parameters to different
+places, such as into driver-level DSNs and connect strings. As per-dialect
+behavior in this area currently varies, the dialect documentation should be
+consulted for the specific dialect in use to see if particular parameters are
+supported at this level.
 
-The most customizable connection method of all is to pass a ``creator``
-argument, which specifies a callable that returns a DBAPI connection:
+.. tip::
 
-.. sourcecode:: python+sql
+  A general technique to display the exact arguments passed to the DBAPI
+  for a given URL may be performed using the :meth:`.Dialect.create_connect_args`
+  method directly as follows::
 
-    def connect():
-        return psycopg.connect(user='scott', host='localhost')
+    >>> from sqlalchemy import create_engine
+    >>> engine = create_engine("mysql+pymysql://some_user:some_pass@some_host/test?charset=utf8mb4")
+    >>> args, kwargs = engine.dialect.create_connect_args(engine.url)
+    >>> args, kwargs
+    ([], {'host': 'some_host', 'database': 'test', 'user': 'some_user', 'password': 'some_pass', 'charset': 'utf8mb4', 'client_flag': 2})
 
-    db = create_engine('postgresql://', creator=connect)
+  The above ``args, kwargs`` pair is normally passed to the DBAPI as
+  ``dbapi.connect(*args, **kwargs)``.
+
+Use the connect_args dictionary parameter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A more general system of passing any parameter to the ``dbapi.connect()``
+function that is guaranteed to pass all parameters at all times is the
+:paramref:`_sa.create_engine.connect_args` dictionary parameter. This may be
+used for parameters that are otherwise not handled by the dialect when added to
+the query string, as well as when special sub-structures or objects must be
+passed to the DBAPI. Sometimes it's just that a particular flag must be sent as
+the ``True`` symbol and the SQLAlchemy dialect is not aware of this keyword
+argument to coerce it from its string form as presented in the URL. Below
+illustrates the use of a psycopg2 "connection factory" that replaces the
+underlying implementation the connection::
 
 
+    engine = create_engine(
+        "postgresql://user:pass@hostname/dbname",
+        connect_args={"connection_factory": MyConnectionFactory}
+    )
+
+Another example is the pyodbc "timeout" parameter::
+
+    engine = create_engine(
+      "mssql+pyodbc://user:pass@sqlsrvr?driver=ODBC+Driver+13+for+SQL+Server",
+      connect_args={"timeout": 30}
+    )
+
+The above example also illustrates that both URL "query string" parameters as
+well as :paramref:`_sa.create_engine.connect_args` may be used at the same
+time; in the case of pyodbc, the "driver" keyword has special meaning
+within the URL.
+
+Controlling how parameters are passed to the DBAPI connect() function
+---------------------------------------------------------------------
+
+Beyond manipulating the parameters passed to ``connect()``, we can further
+customize how the DBAPI ``connect()`` function itself is called using the
+:meth:`.DialectEvents.do_connect` event hook. This hook is passed the full
+``*args, **kwargs`` that the dialect would send to ``connect()``. These
+collections can then be modified in place to alter how they are used::
+
+    from sqlalchemy import event
+
+    engine = create_engine("postgresql://user:pass@hostname/dbname")
+
+    @event.listens_for(engine, "do_connect")
+    def receive_do_connect(dialect, conn_rec, cargs, cparams):
+        cparams['connection_factory'] = MyConnectionFactory
+
+Modifying the DBAPI connection after connect, or running commands after connect
+-------------------------------------------------------------------------------
+
+For a DBAPI connection that SQLAlchemy creates without issue, but where we
+would like to modify the completed connection before it's actually used, such
+as for setting special flags or running certain commands, the
+:meth:`.PoolEvents.connect` event hook is the most appropriate hook.  This
+hook is called for every new connection created, before it is used by
+SQLAlchemy::
+
+    from sqlalchemy import event
+
+    engine = create_engine(
+        "postgresql://user:pass@hostname/dbname"
+    )
+
+    @event.listens_for(engine, "connect")
+    def connect(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("SET some session variables")
+        cursor.close()
+
+
+Fully Replacing the DBAPI ``connect()`` function
+------------------------------------------------
+
+Finally, the :meth:`.DialectEvents.do_connect` event hook can also allow us to take
+over the connection process entirely by establishing the connection
+and returning it::
+
+    from sqlalchemy import event
+
+    engine = create_engine(
+        "postgresql://user:pass@hostname/dbname"
+    )
+
+    @event.listens_for(engine, "do_connect")
+    def receive_do_connect(dialect, conn_rec, cargs, cparams):
+        # return the new DBAPI connection with whatever we'd like to
+        # do
+        return psycopg2.connect(*cargs, **cparams)
+
+The :meth:`.DialectEvents.do_connect` hook supersedes the previous
+:paramref:`_sa.create_engine.creator` hook, which remains available.
+:meth:`.DialectEvents.do_connect` has the distinct advantage that the
+complete arguments parsed from the URL are also passed to the user-defined
+function which is not the case with :paramref:`_sa.create_engine.creator`.
 
 .. _dbengine_logging:
 
@@ -264,8 +387,8 @@ Python's standard `logging
 implement informational and debug log output with SQLAlchemy. This allows
 SQLAlchemy's logging to integrate in a standard way with other applications
 and libraries.   There are also two parameters
-:paramref:`.create_engine.echo` and :paramref:`.create_engine.echo_pool`
-present on :func:`.create_engine` which allow immediate logging to ``sys.stdout``
+:paramref:`_sa.create_engine.echo` and :paramref:`_sa.create_engine.echo_pool`
+present on :func:`_sa.create_engine` which allow immediate logging to ``sys.stdout``
 for the purposes of local development; these parameters ultimately interact
 with the regular Python loggers described below.
 
@@ -275,16 +398,16 @@ namespace, as used by ``logging.getLogger('sqlalchemy')``. When logging has
 been configured (i.e. such as via ``logging.basicConfig()``), the general
 namespace of SA loggers that can be turned on is as follows:
 
-* ``sqlalchemy.engine`` - controls SQL echoing.  set to ``logging.INFO`` for
+* ``sqlalchemy.engine`` - controls SQL echoing.  Set to ``logging.INFO`` for
   SQL query output, ``logging.DEBUG`` for query + result set output.  These
   settings are equivalent to ``echo=True`` and ``echo="debug"`` on
-  :paramref:`.create_engine.echo`, respectively.
+  :paramref:`_sa.create_engine.echo`, respectively.
 
-* ``sqlalchemy.pool`` - controls connection pool logging.  set to
+* ``sqlalchemy.pool`` - controls connection pool logging.  Set to
   ``logging.INFO`` to log connection invalidation and recycle events; set to
   ``logging.DEBUG`` to additionally log all pool checkins and checkouts.
   These settings are equivalent to ``pool_echo=True`` and ``pool_echo="debug"``
-  on :paramref:`.create_engine.echo_pool`, respectively.
+  on :paramref:`_sa.create_engine.echo_pool`, respectively.
 
 * ``sqlalchemy.dialects`` - controls custom logging for SQL dialects, to the
   extend that logging is used within specific dialects, which is generally
@@ -306,34 +429,85 @@ By default, the log level is set to ``logging.WARN`` within the entire
 ``sqlalchemy`` namespace so that no log operations occur, even within an
 application that has logging enabled otherwise.
 
-The ``echo`` flags present as keyword arguments to
-:func:`~sqlalchemy.create_engine` and others as well as the ``echo`` property
-on :class:`~sqlalchemy.engine.Engine`, when set to ``True``, will first
-attempt to ensure that logging is enabled. Unfortunately, the ``logging``
-module provides no way of determining if output has already been configured
-(note we are referring to if a logging configuration has been set up, not just
-that the logging level is set). For this reason, any ``echo=True`` flags will
-result in a call to ``logging.basicConfig()`` using sys.stdout as the
-destination. It also sets up a default format using the level name, timestamp,
-and logger name. Note that this configuration has the affect of being
-configured **in addition** to any existing logger configurations. Therefore,
-**when using Python logging, ensure all echo flags are set to False at all
-times**, to avoid getting duplicate log lines.
-
-The logger name of instance such as an :class:`~sqlalchemy.engine.Engine`
-or :class:`~sqlalchemy.pool.Pool` defaults to using a truncated hex identifier
-string. To set this to a specific name, use the "logging_name" and
-"pool_logging_name" keyword arguments with :func:`sqlalchemy.create_engine`.
-
 .. note::
 
-   The SQLAlchemy :class:`.Engine` conserves Python function call overhead
-   by only emitting log statements when the current logging level is detected
-   as ``logging.INFO`` or ``logging.DEBUG``.  It only checks this level when
-   a new connection is procured from the connection pool.  Therefore when
-   changing the logging configuration for an already-running application, any
-   :class:`.Connection` that's currently active, or more commonly a
-   :class:`~.orm.session.Session` object that's active in a transaction, won't log any
-   SQL according to the new configuration until a new :class:`.Connection`
-   is procured (in the case of :class:`~.orm.session.Session`, this is
-   after the current transaction ends and a new one begins).
+   The SQLAlchemy :class:`_engine.Engine` conserves Python function call
+   overhead by only emitting log statements when the current logging level is
+   detected as ``logging.INFO`` or ``logging.DEBUG``.  It only checks this
+   level when a new connection is procured from the connection pool.  Therefore
+   when changing the logging configuration for an already-running application,
+   any :class:`_engine.Connection` that's currently active, or more commonly a
+   :class:`~.orm.session.Session` object that's active in a transaction, won't
+   log any SQL according to the new configuration until a new
+   :class:`_engine.Connection` is procured (in the case of
+   :class:`~.orm.session.Session`, this is after the current transaction ends
+   and a new one begins).
+
+More on the Echo Flag
+---------------------
+
+As mentioned previously, the :paramref:`_sa.create_engine.echo` and :paramref:`_sa.create_engine.echo_pool`
+parameters are a shortcut to immediate logging to ``sys.stdout``::
+
+
+    >>> from sqlalchemy import create_engine, text
+    >>> e = create_engine("sqlite://", echo=True, echo_pool='debug')
+    >>> with e.connect() as conn:
+    ...    print(conn.scalar(text("select 'hi'")))
+    ...
+    2020-10-24 12:54:57,701 DEBUG sqlalchemy.pool.impl.SingletonThreadPool Created new connection <sqlite3.Connection object at 0x7f287819ac60>
+    2020-10-24 12:54:57,701 DEBUG sqlalchemy.pool.impl.SingletonThreadPool Connection <sqlite3.Connection object at 0x7f287819ac60> checked out from pool
+    2020-10-24 12:54:57,702 INFO sqlalchemy.engine.Engine select 'hi'
+    2020-10-24 12:54:57,702 INFO sqlalchemy.engine.Engine ()
+    hi
+    2020-10-24 12:54:57,703 DEBUG sqlalchemy.pool.impl.SingletonThreadPool Connection <sqlite3.Connection object at 0x7f287819ac60> being returned to pool
+    2020-10-24 12:54:57,704 DEBUG sqlalchemy.pool.impl.SingletonThreadPool Connection <sqlite3.Connection object at 0x7f287819ac60> rollback-on-return
+
+Use of these flags is roughly equivalent to::
+
+    import logging
+    logging.basicConfig()
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.DEBUG)
+
+It's important to note that these two flags work **independently** of any
+existing logging configuration, and will make use of ``logging.basicConfig()``
+unconditionally.  This has the effect of being configured **in addition** to
+any existing logger configurations. Therefore, **when configuring logging
+explicitly, ensure all echo flags are set to False at all times**, to avoid
+getting duplicate log lines.
+
+Setting the Logging Name
+-------------------------
+
+The logger name of instance such as an :class:`~sqlalchemy.engine.Engine` or
+:class:`~sqlalchemy.pool.Pool` defaults to using a truncated hex identifier
+string. To set this to a specific name, use the
+:paramref:`_sa.create_engine.logging_name` and
+:paramref:`_sa.create_engine.pool_logging_name`  with
+:func:`sqlalchemy.create_engine`::
+
+    >>> from sqlalchemy import create_engine
+    >>> from sqlalchemy import text
+    >>> e = create_engine("sqlite://", echo=True, logging_name='myengine')
+    >>> with e.connect() as conn:
+    ...     conn.execute(text("select 'hi'"))
+    ...
+    2020-10-24 12:47:04,291 INFO sqlalchemy.engine.Engine.myengine select 'hi'
+    2020-10-24 12:47:04,292 INFO sqlalchemy.engine.Engine.myengine ()
+
+Hiding Parameters
+------------------
+
+The logging emitted by :class:`_engine.Engine` also indicates an excerpt
+of the SQL parameters that are present for a particular statement.  To prevent
+these parameters from being logged for privacy purposes, enable the
+:paramref:`_sa.create_engine.hide_parameters` flag::
+
+    >>> e = create_engine("sqlite://", echo=True, hide_parameters=True)
+    >>> with e.connect() as conn:
+    ...     conn.execute(text("select :some_private_name"), {"some_private_name": "pii"})
+    ...
+    2020-10-24 12:48:32,808 INFO sqlalchemy.engine.Engine select ?
+    2020-10-24 12:48:32,808 INFO sqlalchemy.engine.Engine [SQL parameters hidden due to hide_parameters=True]
+

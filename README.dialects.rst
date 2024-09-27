@@ -6,7 +6,7 @@ Developing new Dialects
 
    When studying this file, it's probably a good idea to also
    familiarize with the  README.unittests.rst file, which discusses
-   SQLAlchemy's usage and extension of the py.test test runner.
+   SQLAlchemy's usage and extension of the pytest test runner.
 
 While SQLAlchemy includes many dialects within the core distribution, the
 trend for new dialects should be that they are published as external
@@ -46,7 +46,7 @@ The file structure of a dialect is typically similar to the following::
                                               ...
 
 An example of this structure can be seen in the Access dialect at
-https://bitbucket.org/zzzeek/sqlalchemy-access/.
+https://github.com/sqlalchemy/sqlalchemy-access .
 
 Key aspects of this file layout include:
 
@@ -125,8 +125,8 @@ Key aspects of this file layout include:
   For a third-party dialect, the custom ``Requirements`` class can
   usually specify a simple yes/no answer for a particular system. For
   example, a requirements file that specifies a database that supports
-  the RETURNING construct but does not support reflection of tables
-  might look like this::
+  the RETURNING construct but does not support nullable boolean
+  columns might look like this::
 
       # sqlalchemy_access/requirements.py
 
@@ -154,7 +154,7 @@ Key aspects of this file layout include:
   test runner so that exclusions specific to the dialect take place::
 
     cd /path/to/sqlalchemy
-    py.test -v \
+    pytest -v \
       --requirements sqlalchemy_access.requirements:Requirements \
       --dburi access+pyodbc://admin@access_test
 

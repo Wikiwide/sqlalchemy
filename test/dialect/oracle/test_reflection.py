@@ -49,6 +49,8 @@ create table %(test_schema)s.parent(
     data varchar2(50)
 );
 
+COMMENT ON TABLE %(test_schema)s.parent IS 'my table comment';
+
 create table %(test_schema)s.child(
     id integer primary key,
     data varchar2(50),
@@ -188,6 +190,40 @@ drop synonym %(test_schema)s.local_table;
         select([parent, child]).select_from(
             parent.join(child)
         ).execute().fetchall()
+
+        # check table comment (#5146)
+        eq_(parent.comment, "my table comment")
+
+    @testing.provide_metadata
+    def test_reflect_table_comment(self):
+        local_parent = Table(
+            "parent",
+            self.metadata,
+            Column("q", Integer),
+            comment="my local comment",
+        )
+
+        local_parent.create(testing.db)
+
+        insp = inspect(testing.db)
+        eq_(
+            insp.get_table_comment(
+                "parent", schema=testing.config.test_schema
+            ),
+            {"text": "my table comment"},
+        )
+        eq_(
+            insp.get_table_comment(
+                "parent",
+            ),
+            {"text": "my local comment"},
+        )
+        eq_(
+            insp.get_table_comment(
+                "parent", schema=testing.db.dialect.default_schema_name
+            ),
+            {"text": "my local comment"},
+        )
 
     def test_reflect_local_to_remote(self):
         testing.db.execute(
@@ -420,27 +456,24 @@ class UnsupportedIndexReflectTest(fixtures.TestBase):
 
 
 def all_tables_compression_missing():
-    try:
-        testing.db.execute("SELECT compression FROM all_tables")
-        if "Enterprise Edition" not in testing.db.scalar(
-            "select * from v$version"
-        ):
+    with testing.db.connect() as conn:
+        if (
+            "Enterprise Edition"
+            not in conn.execute("select * from v$version").scalar()
+            # this works in Oracle Database 18c Express Edition Release
+        ) and testing.db.dialect.server_version_info < (18,):
             return True
         return False
-    except Exception:
-        return True
 
 
 def all_tables_compress_for_missing():
-    try:
-        testing.db.execute("SELECT compress_for FROM all_tables")
-        if "Enterprise Edition" not in testing.db.scalar(
-            "select * from v$version"
+    with testing.db.connect() as conn:
+        if (
+            "Enterprise Edition"
+            not in conn.execute("select * from v$version").scalar()
         ):
             return True
         return False
-    except Exception:
-        return True
 
 
 class TableReflectionTest(fixtures.TestBase):
@@ -490,6 +523,83 @@ class RoundTripIndexTest(fixtures.TestBase):
     __backend__ = True
 
     @testing.provide_metadata
+    def test_no_pk(self):
+        metadata = self.metadata
+
+        Table(
+            "sometable",
+            metadata,
+            Column("id_a", Unicode(255)),
+            Column("id_b", Unicode(255)),
+            Index("pk_idx_1", "id_a", "id_b", unique=True),
+            Index("pk_idx_2", "id_b", "id_a", unique=True),
+        )
+        metadata.create_all()
+
+        insp = inspect(testing.db)
+        eq_(
+            insp.get_indexes("sometable"),
+            [
+                {
+                    "name": "pk_idx_1",
+                    "column_names": ["id_a", "id_b"],
+                    "dialect_options": {},
+                    "unique": True,
+                },
+                {
+                    "name": "pk_idx_2",
+                    "column_names": ["id_b", "id_a"],
+                    "dialect_options": {},
+                    "unique": True,
+                },
+            ],
+        )
+
+    @testing.combinations((True,), (False,))
+    @testing.provide_metadata
+    def test_include_indexes_resembling_pk(self, explicit_pk):
+        metadata = self.metadata
+
+        t = Table(
+            "sometable",
+            metadata,
+            Column("id_a", Unicode(255), primary_key=True),
+            Column("id_b", Unicode(255), primary_key=True),
+            Column("group", Unicode(255), primary_key=True),
+            Column("col", Unicode(255)),
+            # Oracle won't let you do this unless the indexes have
+            # the columns in different order
+            Index("pk_idx_1", "id_b", "id_a", "group", unique=True),
+            Index("pk_idx_2", "id_b", "group", "id_a", unique=True),
+        )
+        if explicit_pk:
+            t.append_constraint(
+                PrimaryKeyConstraint(
+                    "id_a", "id_b", "group", name="some_primary_key"
+                )
+            )
+        metadata.create_all()
+
+        insp = inspect(testing.db)
+        eq_(
+            insp.get_indexes("sometable"),
+            [
+                {
+                    "name": "pk_idx_1",
+                    "column_names": ["id_b", "id_a", "group"],
+                    "dialect_options": {},
+                    "unique": True,
+                },
+                {
+                    "name": "pk_idx_2",
+                    "column_names": ["id_b", "group", "id_a"],
+                    "dialect_options": {},
+                    "unique": True,
+                },
+            ],
+        )
+
+    @testing.provide_metadata
     def test_basic(self):
         metadata = self.metadata
 
@@ -517,8 +627,10 @@ class RoundTripIndexTest(fixtures.TestBase):
         )
 
         metadata.create_all()
+
         mirror = MetaData(testing.db)
         mirror.reflect()
+
         metadata.drop_all()
         mirror.create_all()
 

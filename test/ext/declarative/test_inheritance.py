@@ -894,9 +894,7 @@ class DeclarativeInheritanceTest(DeclarativeTestBase):
         )
 
     def test_columns_single_inheritance_cascading_resolution_pk(self):
-        """An additional test for #4352 in terms of the requested use case.
-
-        """
+        """An additional test for #4352 in terms of the requested use case."""
 
         class TestBase(Base):
             __abstract__ = True
@@ -2037,4 +2035,39 @@ class ConcreteExtensionConfigTest(
             "SELECT pjoin.documenttype AS pjoin_documenttype FROM "
             "(SELECT offers.documenttype AS documenttype, offers.id AS id, "
             "'offer' AS type FROM offers) AS pjoin",
+        )
+
+    def test_configure_discriminator_col(self):
+        """test #5513"""
+
+        class Employee(AbstractConcreteBase, Base):
+            _concrete_discriminator_name = "_alt_discriminator"
+            employee_id = Column(Integer, primary_key=True)
+
+        class Manager(Employee):
+            __tablename__ = "manager"
+
+            __mapper_args__ = {
+                "polymorphic_identity": "manager",
+                "concrete": True,
+            }
+
+        class Engineer(Employee):
+            __tablename__ = "engineer"
+
+            __mapper_args__ = {
+                "polymorphic_identity": "engineer",
+                "concrete": True,
+            }
+
+        configure_mappers()
+        self.assert_compile(
+            Session().query(Employee),
+            "SELECT pjoin.employee_id AS pjoin_employee_id, "
+            "pjoin._alt_discriminator AS pjoin__alt_discriminator "
+            "FROM (SELECT engineer.employee_id AS employee_id, "
+            "'engineer' AS _alt_discriminator FROM engineer "
+            "UNION ALL SELECT manager.employee_id AS employee_id, "
+            "'manager' AS _alt_discriminator "
+            "FROM manager) AS pjoin",
         )

@@ -275,9 +275,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_recursive_union_alias_two(self):
-        """
-
-        """
+        """"""
 
         # I know, this is the PG VALUES keyword,
         # we're cheating here.  also yes we need the SELECT,
@@ -899,6 +897,28 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             'ON anon_1."order" = "order"."order"',
         )
 
+    def test_prefixes(self):
+        orders = table("order", column("order"))
+        s = select([orders.c.order]).cte("regional_sales")
+        s = s.prefix_with("NOT MATERIALIZED", dialect="postgresql")
+        stmt = select([orders]).where(orders.c.order > s.c.order)
+
+        self.assert_compile(
+            stmt,
+            'WITH regional_sales AS (SELECT "order"."order" AS "order" '
+            'FROM "order") SELECT "order"."order" FROM "order", '
+            'regional_sales WHERE "order"."order" > regional_sales."order"',
+        )
+
+        self.assert_compile(
+            stmt,
+            "WITH regional_sales AS NOT MATERIALIZED "
+            '(SELECT "order"."order" AS "order" '
+            'FROM "order") SELECT "order"."order" FROM "order", '
+            'regional_sales WHERE "order"."order" > regional_sales."order"',
+            dialect="postgresql",
+        )
+
     def test_suffixes(self):
         orders = table("order", column("order"))
         s = select([orders.c.order]).cte("regional_sales")
@@ -973,6 +993,8 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "upsert.quantity FROM upsert))",
         )
 
+        eq_(insert.compile().isinsert, True)
+
     def test_anon_update_cte(self):
         orders = table("orders", column("region"))
         stmt = (
@@ -990,6 +1012,8 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT anon_1.region FROM anon_1",
         )
 
+        eq_(stmt.select().compile().isupdate, False)
+
     def test_anon_insert_cte(self):
         orders = table("orders", column("region"))
         stmt = (
@@ -1002,6 +1026,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "VALUES (:region) RETURNING orders.region) "
             "SELECT anon_1.region FROM anon_1",
         )
+        eq_(stmt.select().compile().isinsert, False)
 
     def test_pg_example_one(self):
         products = table("products", column("id"), column("date"))
@@ -1028,6 +1053,33 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "INSERT INTO products_log (id, date) "
             "SELECT moved_rows.id, moved_rows.date FROM moved_rows",
         )
+        eq_(stmt.compile().isinsert, True)
+        eq_(stmt.compile().isdelete, False)
+
+    def test_pg_example_one_select_only(self):
+        products = table("products", column("id"), column("date"))
+
+        moved_rows = (
+            products.delete()
+            .where(
+                and_(products.c.date >= "dateone", products.c.date < "datetwo")
+            )
+            .returning(*products.c)
+            .cte("moved_rows")
+        )
+
+        stmt = moved_rows.select()
+
+        self.assert_compile(
+            stmt,
+            "WITH moved_rows AS "
+            "(DELETE FROM products WHERE products.date >= :date_1 "
+            "AND products.date < :date_2 "
+            "RETURNING products.id, products.date) "
+            "SELECT moved_rows.id, moved_rows.date FROM moved_rows",
+        )
+
+        eq_(stmt.compile().isdelete, False)
 
     def test_pg_example_two(self):
         products = table("products", column("id"), column("price"))
@@ -1050,6 +1102,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT t.id, t.price "
             "FROM t",
         )
+        eq_(stmt.compile().isupdate, False)
 
     def test_pg_example_three(self):
 
@@ -1110,6 +1163,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT pd.id, pd.price "
             "FROM pd",
         )
+        eq_(stmt.compile().isinsert, False)
 
     def test_update_pulls_from_cte(self):
         products = table("products", column("id"), column("price"))
@@ -1128,6 +1182,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "UPDATE products SET id=:id, price=:price FROM pd "
             "WHERE products.price = pd.price",
         )
+        eq_(stmt.compile().isupdate, True)
 
     def test_standalone_function(self):
         a = table("a", column("x"))
